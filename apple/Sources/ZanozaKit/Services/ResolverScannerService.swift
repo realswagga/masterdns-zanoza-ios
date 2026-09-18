@@ -353,14 +353,15 @@ public final class ResolverScannerService: @unchecked Sendable {
                 MobileSetLogWriter(relay)
                 defer { MobileSetLogWriter(nil) }
                 var scanError: NSError?
-                guard let json = MobileScanResolvers(
+                let json = MobileScanResolvers(
                     config,
                     resolvers,
                     runtimeDirectory.path,
                     timeoutSeconds,
                     &scanError
-                ) else {
-                    throw ResolverScannerError.nativeScanFailed(scanError?.localizedDescription ?? "Unknown error")
+                )
+                if let scanError {
+                    throw ResolverScannerError.nativeScanFailed(scanError.localizedDescription)
                 }
                 guard let data = json.data(using: .utf8),
                       let payload = try? JSONDecoder().decode(NativeResolverScanPayload.self, from: data) else {
