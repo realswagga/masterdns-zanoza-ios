@@ -15,10 +15,10 @@ func TestBuildSocksUDPResponseHeaderIPv4EchoesTarget(t *testing.T) {
 	got := buildSocksUDPResponseHeader(SOCKS5_ATYP_IPV4, "77.88.8.88", 53)
 	want := []byte{
 		0x00, 0x00, // RSV
-		0x00,                   // FRAG
-		SOCKS5_ATYP_IPV4,       // ATYP
-		77, 88, 8, 88,          // DST.ADDR
-		0x00, 0x35,             // DST.PORT = 53
+		0x00,             // FRAG
+		SOCKS5_ATYP_IPV4, // ATYP
+		77, 88, 8, 88,    // DST.ADDR
+		0x00, 0x35, // DST.PORT = 53
 	}
 	if !bytes.Equal(got, want) {
 		t.Fatalf("header = %x, want %x", got, want)
@@ -92,6 +92,35 @@ func TestSupportsSOCKS4Policy(t *testing.T) {
 				t.Fatalf("supportsSOCKS4() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestSOCKS5AuthCompatibilityForEmptySubscriptionUserInfo(t *testing.T) {
+	withoutAuth := &Client{cfg: config.ClientConfig{SOCKS5Auth: false}}
+	if got := withoutAuth.selectSOCKS5AuthMethod([]byte{SOCKS5_AUTH_METHOD_USER_PASS}); got != SOCKS5_AUTH_METHOD_USER_PASS {
+		t.Fatalf("user/password-only greeting selected 0x%02x, want compatibility method 0x%02x", got, SOCKS5_AUTH_METHOD_USER_PASS)
+	}
+	if !withoutAuth.acceptSOCKS5Credentials("", "") {
+		t.Fatal("empty compatibility credentials must be accepted when authentication is disabled")
+	}
+	if !withoutAuth.acceptSOCKS5Credentials("subscription-parser", "placeholder") {
+		t.Fatal("authentication-disabled listener must not reject a local caller based on compatibility credentials")
+	}
+
+	withAuth := &Client{cfg: config.ClientConfig{SOCKS5Auth: true, SOCKS5User: "user", SOCKS5Pass: "pass"}}
+	if withAuth.acceptSOCKS5Credentials("", "") {
+		t.Fatal("empty credentials must be rejected when authentication is enabled")
+	}
+	if !withAuth.acceptSOCKS5Credentials("user", "pass") {
+		t.Fatal("configured credentials must be accepted")
+	}
+}
+
+func TestSOCKS5AuthCompatibilityStillPrefersNoAuth(t *testing.T) {
+	c := &Client{cfg: config.ClientConfig{SOCKS5Auth: false}}
+	methods := []byte{SOCKS5_AUTH_METHOD_USER_PASS, SOCKS5_AUTH_METHOD_NO_AUTH}
+	if got := c.selectSOCKS5AuthMethod(methods); got != SOCKS5_AUTH_METHOD_NO_AUTH {
+		t.Fatalf("selected 0x%02x, want no-auth 0x%02x", got, SOCKS5_AUTH_METHOD_NO_AUTH)
 	}
 }
 

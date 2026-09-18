@@ -82,38 +82,87 @@ public struct ConnectionProfile: Codable, Equatable, Identifiable {
     public var domain: String
     public var encryptionKey: String
     public var encryptionMethod: EncryptionMethod
-    public var uploadCompression: CompressionType
-    public var downloadCompression: CompressionType
-    public var packetDuplicationCount: Int
-    public var setupPacketDuplicationCount: Int
-    public var resolverBalancingStrategy: BalancingStrategy
-    public var logLevel: LogLevel
+    public var configuration: MasterDnsClientConfiguration
+    public var appliedConfigurationPreset: MasterDnsConfigurationPreset
+    public var resolverPresetID: UUID?
+
+    public var uploadCompression: CompressionType {
+        get { configuration.encoding.uploadCompression }
+        set { configuration.encoding.uploadCompression = newValue }
+    }
+
+    public var downloadCompression: CompressionType {
+        get { configuration.encoding.downloadCompression }
+        set { configuration.encoding.downloadCompression = newValue }
+    }
+
+    public var packetDuplicationCount: Int {
+        get { configuration.resolver.packetDuplicationCount }
+        set { configuration.resolver.packetDuplicationCount = newValue }
+    }
+
+    public var setupPacketDuplicationCount: Int {
+        get { configuration.resolver.setupPacketDuplicationCount }
+        set { configuration.resolver.setupPacketDuplicationCount = newValue }
+    }
+
+    public var resolverBalancingStrategy: BalancingStrategy {
+        get { configuration.resolver.balancingStrategy }
+        set { configuration.resolver.balancingStrategy = newValue }
+    }
+
+    public var logLevel: LogLevel {
+        get { configuration.logLevel }
+        set { configuration.logLevel = newValue }
+    }
 
     public init(
         id: UUID = UUID(),
         name: String = "",
         domain: String = "",
         encryptionKey: String = "",
-        encryptionMethod: EncryptionMethod = .xor,
-        uploadCompression: CompressionType = .zlib,
-        downloadCompression: CompressionType = .zlib,
-        packetDuplicationCount: Int = 5,
-        setupPacketDuplicationCount: Int = 6,
-        resolverBalancingStrategy: BalancingStrategy = .hybridScore,
-        logLevel: LogLevel = .info
+        encryptionMethod: EncryptionMethod = .aes256gcm,
+        uploadCompression: CompressionType? = nil,
+        downloadCompression: CompressionType? = nil,
+        packetDuplicationCount: Int? = nil,
+        setupPacketDuplicationCount: Int? = nil,
+        resolverBalancingStrategy: BalancingStrategy? = nil,
+        logLevel: LogLevel? = nil,
+        configuration: MasterDnsClientConfiguration? = nil,
+        appliedConfigurationPreset: MasterDnsConfigurationPreset = .andronReliability,
+        resolverPresetID: UUID? = nil
     ) {
         self.id = id
         self.name = name
         self.domain = domain
         self.encryptionKey = encryptionKey
         self.encryptionMethod = encryptionMethod
-        self.uploadCompression = uploadCompression
-        self.downloadCompression = downloadCompression
-        let clampedPacketDuplicationCount = max(1, min(10, packetDuplicationCount))
-        self.packetDuplicationCount = clampedPacketDuplicationCount
-        self.setupPacketDuplicationCount = max(clampedPacketDuplicationCount, min(12, setupPacketDuplicationCount))
-        self.resolverBalancingStrategy = resolverBalancingStrategy
-        self.logLevel = logLevel
+        var effectiveConfiguration = configuration ?? .preset(appliedConfigurationPreset)
+        if let uploadCompression {
+            effectiveConfiguration.encoding.uploadCompression = uploadCompression
+        }
+        if let downloadCompression {
+            effectiveConfiguration.encoding.downloadCompression = downloadCompression
+        }
+        if let packetDuplicationCount {
+            effectiveConfiguration.resolver.packetDuplicationCount = max(1, min(10, packetDuplicationCount))
+        }
+        if let setupPacketDuplicationCount {
+            effectiveConfiguration.resolver.setupPacketDuplicationCount = max(
+                effectiveConfiguration.resolver.packetDuplicationCount,
+                min(12, setupPacketDuplicationCount)
+            )
+        }
+        if let resolverBalancingStrategy {
+            effectiveConfiguration.resolver.balancingStrategy = resolverBalancingStrategy
+        }
+        if let logLevel {
+            effectiveConfiguration.logLevel = logLevel
+        }
+        effectiveConfiguration.normalize()
+        self.configuration = effectiveConfiguration
+        self.appliedConfigurationPreset = appliedConfigurationPreset
+        self.resolverPresetID = resolverPresetID
     }
 
     enum CodingKeys: String, CodingKey {
@@ -121,27 +170,58 @@ public struct ConnectionProfile: Codable, Equatable, Identifiable {
         case uploadCompression, downloadCompression
         case packetDuplicationCount, setupPacketDuplicationCount
         case resolverBalancingStrategy, logLevel
+        case configuration, appliedConfigurationPreset, resolverPresetID
     }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        self.init(
-            id: try c.decode(UUID.self, forKey: .id),
-            name: try c.decodeIfPresent(String.self, forKey: .name) ?? "",
-            domain: try c.decodeIfPresent(String.self, forKey: .domain) ?? "",
-            encryptionKey: try c.decodeIfPresent(String.self, forKey: .encryptionKey) ?? "",
-            encryptionMethod: try c.decodeIfPresent(EncryptionMethod.self, forKey: .encryptionMethod) ?? .xor,
-            uploadCompression: try c.decodeIfPresent(CompressionType.self, forKey: .uploadCompression) ?? .zlib,
-            downloadCompression: try c.decodeIfPresent(CompressionType.self, forKey: .downloadCompression) ?? .zlib,
-            packetDuplicationCount: try c.decodeIfPresent(Int.self, forKey: .packetDuplicationCount) ?? 5,
-            setupPacketDuplicationCount: try c.decodeIfPresent(Int.self, forKey: .setupPacketDuplicationCount) ?? 6,
-            resolverBalancingStrategy: try c.decodeIfPresent(BalancingStrategy.self, forKey: .resolverBalancingStrategy) ?? .hybridScore,
-            logLevel: try c.decodeIfPresent(LogLevel.self, forKey: .logLevel) ?? .info
-        )
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        name = try c.decodeIfPresent(String.self, forKey: .name) ?? ""
+        domain = try c.decodeIfPresent(String.self, forKey: .domain) ?? ""
+        encryptionKey = try c.decodeIfPresent(String.self, forKey: .encryptionKey) ?? ""
+        encryptionMethod = try c.decodeIfPresent(EncryptionMethod.self, forKey: .encryptionMethod) ?? .xor
+        resolverPresetID = try c.decodeIfPresent(UUID.self, forKey: .resolverPresetID)
+
+        if var decoded = try c.decodeIfPresent(MasterDnsClientConfiguration.self, forKey: .configuration) {
+            decoded.normalize()
+            configuration = decoded
+            appliedConfigurationPreset = try c.decodeIfPresent(
+                MasterDnsConfigurationPreset.self,
+                forKey: .appliedConfigurationPreset
+            ) ?? .custom
+        } else {
+            // Backward-compatible migration for profiles saved by Zanoza 0.1.x.
+            var migrated = MasterDnsClientConfiguration.preset(.compatibility)
+            migrated.encoding.uploadCompression = try c.decodeIfPresent(CompressionType.self, forKey: .uploadCompression) ?? .zlib
+            migrated.encoding.downloadCompression = try c.decodeIfPresent(CompressionType.self, forKey: .downloadCompression) ?? .zlib
+            migrated.resolver.packetDuplicationCount = try c.decodeIfPresent(Int.self, forKey: .packetDuplicationCount) ?? 5
+            migrated.resolver.setupPacketDuplicationCount = try c.decodeIfPresent(Int.self, forKey: .setupPacketDuplicationCount) ?? 6
+            migrated.resolver.balancingStrategy = try c.decodeIfPresent(BalancingStrategy.self, forKey: .resolverBalancingStrategy) ?? .hybridScore
+            migrated.logLevel = try c.decodeIfPresent(LogLevel.self, forKey: .logLevel) ?? .info
+            migrated.normalize()
+            configuration = migrated
+            appliedConfigurationPreset = .custom
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(name, forKey: .name)
+        try c.encode(domain, forKey: .domain)
+        try c.encode(encryptionKey, forKey: .encryptionKey)
+        try c.encode(encryptionMethod, forKey: .encryptionMethod)
+        try c.encode(configuration, forKey: .configuration)
+        try c.encode(appliedConfigurationPreset, forKey: .appliedConfigurationPreset)
+        try c.encodeIfPresent(resolverPresetID, forKey: .resolverPresetID)
     }
 
     public static var empty: ConnectionProfile {
-        ConnectionProfile(name: AppLocalization.string("New profile"))
+        return ConnectionProfile(
+            name: AppLocalization.string("New profile"),
+            encryptionMethod: .aes256gcm,
+            appliedConfigurationPreset: .andronReliability
+        )
     }
 
     public var displayName: String {

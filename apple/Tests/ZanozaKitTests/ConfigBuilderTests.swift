@@ -39,19 +39,43 @@ final class ConfigBuilderTests: XCTestCase {
         XCTAssertEqual(ConfigBuilder.resolversText(settings: settings), custom)
     }
 
-    func testSettingsSocksPortAuthFlowsIntoTOML() {
-        let profile = ConnectionProfile(name: "T", domain: "v.example.com", encryptionKey: "k")
-        let settings = AppSettings(
-            socksPort: 9999,
-            socksUser: "alice",
-            socksPass: "p@ss",
-            socksAuthEnabled: true
-        )
-        let toml = ConfigBuilder.buildTOML(for: profile, settings: settings)
+    func testProfileListenerFlowsIntoTOML() {
+        var profile = ConnectionProfile(name: "T", domain: "v.example.com", encryptionKey: "k")
+        profile.configuration.listener.listenPort = 9999
+        profile.configuration.listener.socksUser = "alice"
+        profile.configuration.listener.socksPass = "p@ss"
+        profile.configuration.listener.socksAuth = true
+        let toml = ConfigBuilder.buildTOML(for: profile, settings: AppSettings())
         XCTAssertTrue(toml.contains("LISTEN_PORT = 9999"))
         XCTAssertTrue(toml.contains("SOCKS5_AUTH = true"))
         XCTAssertTrue(toml.contains("SOCKS5_USER = \"alice\""))
         XCTAssertTrue(toml.contains("SOCKS5_PASS = \"p@ss\""))
+    }
+
+    func testBuildsCompleteAndronConfiguration() {
+        let profile = ConnectionProfile(name: "Andron", domain: "x.false.actor", encryptionKey: "secret")
+        let toml = ConfigBuilder.buildTOML(for: profile, settings: AppSettings())
+        let required = [
+            "DATA_ENCRYPTION_METHOD = 5",
+            "BASE_ENCODE_DATA = true",
+            "UPLOAD_COMPRESSION_TYPE = 0",
+            "DOWNLOAD_COMPRESSION_TYPE = 0",
+            "RESOLVER_BALANCING_STRATEGY = 3",
+            "PACKET_DUPLICATION_COUNT = 2",
+            "SETUP_PACKET_DUPLICATION_COUNT = 3",
+            "MIN_UPLOAD_MTU = 40",
+            "MAX_UPLOAD_MTU = 133",
+            "MIN_DOWNLOAD_MTU = 200",
+            "MAX_DOWNLOAD_MTU = 2048",
+            "HTTP_PROXY_ENABLED = true",
+            "SOCKS_OPTIMISTIC_CONNECT = true",
+            "LOCAL_DNS_ENABLED = false",
+            "RX_TX_WORKERS = 8",
+            "TUNNEL_PROCESS_WORKERS = 8",
+        ]
+        for setting in required {
+            XCTAssertTrue(toml.contains(setting), "Missing \(setting)")
+        }
     }
 }
 
@@ -62,11 +86,56 @@ final class ConnectionProfileTests: XCTestCase {
 
     func testDefaultProfileUsesRequestedMasterDnsKnobs() {
         let profile = ConnectionProfile()
-        XCTAssertEqual(profile.resolverBalancingStrategy, .hybridScore)
-        XCTAssertEqual(profile.packetDuplicationCount, 5)
-        XCTAssertEqual(profile.setupPacketDuplicationCount, 6)
-        XCTAssertEqual(profile.uploadCompression, .zlib)
-        XCTAssertEqual(profile.downloadCompression, .zlib)
+        XCTAssertEqual(profile.encryptionMethod, .aes256gcm)
+        XCTAssertEqual(profile.resolverBalancingStrategy, .leastLoss)
+        XCTAssertEqual(profile.packetDuplicationCount, 2)
+        XCTAssertEqual(profile.setupPacketDuplicationCount, 3)
+        XCTAssertEqual(profile.uploadCompression, .off)
+        XCTAssertEqual(profile.downloadCompression, .off)
+        XCTAssertEqual(profile.configuration.mtu.maxUpload, 133)
+        XCTAssertEqual(profile.configuration.mtu.maxDownload, 2_048)
+    }
+
+    func testProvidedFullConfigurationIsNotOverwrittenByInitializerDefaults() {
+        var configuration = MasterDnsClientConfiguration.preset(.performance)
+        configuration.listener.listenPort = 42_222
+        configuration.arq.windowSize = 777
+        let profile = ConnectionProfile(
+            name: "Full",
+            domain: "x.false.actor",
+            encryptionKey: "secret",
+            configuration: configuration,
+            appliedConfigurationPreset: .custom
+        )
+        XCTAssertEqual(profile.configuration, configuration)
+        XCTAssertEqual(profile.configuration.listener.listenPort, 42_222)
+        XCTAssertEqual(profile.configuration.resolver.packetDuplicationCount, 1)
+        XCTAssertEqual(profile.configuration.encoding.uploadCompression, .lz4)
+    }
+
+    func testLegacyProfileDecodesWithOriginalValues() throws {
+        let json = """
+        {
+          "id": "11111111-1111-1111-1111-111111111111",
+          "name": "Legacy",
+          "domain": "x.false.actor",
+          "encryptionKey": "secret",
+          "encryptionMethod": 1,
+          "uploadCompression": 3,
+          "downloadCompression": 3,
+          "packetDuplicationCount": 5,
+          "setupPacketDuplicationCount": 6,
+          "resolverBalancingStrategy": 5,
+          "logLevel": "INFO"
+        }
+        """
+        let decoded = try JSONDecoder().decode(ConnectionProfile.self, from: Data(json.utf8))
+        XCTAssertEqual(decoded.encryptionMethod, .xor)
+        XCTAssertEqual(decoded.uploadCompression, .zlib)
+        XCTAssertEqual(decoded.packetDuplicationCount, 5)
+        XCTAssertEqual(decoded.setupPacketDuplicationCount, 6)
+        XCTAssertEqual(decoded.resolverBalancingStrategy, .hybridScore)
+        XCTAssertEqual(decoded.appliedConfigurationPreset, .custom)
     }
 
     func testSettingsNormalizesOutOfRangePort() {
@@ -106,6 +175,12 @@ final class ConnectionProfileTests: XCTestCase {
         let data = try JSONEncoder().encode(settings)
         let decoded = try JSONDecoder().decode(AppSettings.self, from: data)
         XCTAssertEqual(decoded, settings)
+    }
+
+    func testLegacySettingsRequestOneTimeProfileListenerMigration() throws {
+        let legacy = try JSONDecoder().decode(AppSettings.self, from: Data("{}".utf8))
+        XCTAssertFalse(legacy.didMigrateProfileListeners)
+        XCTAssertTrue(AppSettings().didMigrateProfileListeners)
     }
 
     func testInvalidResolverProviderFallsBackToNone() {

@@ -1,8 +1,8 @@
 import Foundation
 
-// Global app-wide configuration shared by every profile: SOCKS listener
-// parameters and an optional custom resolver list that overrides the
-// bundled defaults when non-empty.
+// Global resolver-provider configuration plus retained 0.1.x listener fields.
+// Listener settings are migrated into each profile once; current builds edit
+// them in the profile's full MasterDNS configuration.
 public struct AppSettings: Codable, Equatable {
     public static let defaultSocksPort = 41080
     public static let noResolverProviderID = ""
@@ -18,6 +18,7 @@ public struct AppSettings: Codable, Equatable {
     public var resolverProviderID: String
     public var useFastResolvers: Bool
     public var systemVPNEnabled: Bool
+    public var didMigrateProfileListeners: Bool
 
     public init(
         socksPort: Int = Self.defaultSocksPort,
@@ -27,7 +28,8 @@ public struct AppSettings: Codable, Equatable {
         customResolvers: String = "",
         resolverProviderID: String = Self.noResolverProviderID,
         useFastResolvers: Bool = false,
-        systemVPNEnabled: Bool = false
+        systemVPNEnabled: Bool = false,
+        didMigrateProfileListeners: Bool = true
     ) {
         self.socksPort = Self.normalizedSocksPort(socksPort)
         self.socksUser = socksUser
@@ -37,6 +39,7 @@ public struct AppSettings: Codable, Equatable {
         self.resolverProviderID = Self.normalizedResolverProviderID(resolverProviderID)
         self.useFastResolvers = useFastResolvers
         self.systemVPNEnabled = systemVPNEnabled
+        self.didMigrateProfileListeners = didMigrateProfileListeners
     }
 
     public init(from decoder: Decoder) throws {
@@ -51,6 +54,8 @@ public struct AppSettings: Codable, Equatable {
         resolverProviderID = Self.normalizedResolverProviderID(providerID)
         useFastResolvers = try container.decodeIfPresent(Bool.self, forKey: .useFastResolvers) ?? false
         systemVPNEnabled = try container.decodeIfPresent(Bool.self, forKey: .systemVPNEnabled) ?? false
+        // A missing key identifies settings written by Zanoza 0.1.x.
+        didMigrateProfileListeners = try container.decodeIfPresent(Bool.self, forKey: .didMigrateProfileListeners) ?? false
     }
 
     public static func normalizedSocksPort(_ port: Int) -> Int {

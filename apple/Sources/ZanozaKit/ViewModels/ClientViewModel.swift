@@ -22,6 +22,7 @@ public final class ClientViewModel: ObservableObject {
     #endif
     private let profileStore = ProfileStore.shared
     private let settingsStore = AppSettingsStore.shared
+    public let resolverPresetStore = ResolverPresetStore.shared
     private let pinger = ProfilePinger()
     public let physicalInterfaceMonitor = PhysicalInterfaceMonitor()
     private var cancellables = Set<AnyCancellable>()
@@ -33,6 +34,18 @@ public final class ClientViewModel: ObservableObject {
     public init() {
         settings = AppSettingsStore.shared.load()
         profiles = profileStore.load()
+        if !settings.didMigrateProfileListeners {
+            for index in profiles.indices {
+                profiles[index].configuration.listener.listenPort = settings.socksPort
+                profiles[index].configuration.listener.socksUser = settings.socksUser
+                profiles[index].configuration.listener.socksPass = settings.socksPass
+                profiles[index].configuration.listener.socksAuth = settings.socksAuthEnabled
+                profiles[index].configuration.normalize()
+            }
+            settings.didMigrateProfileListeners = true
+            profileStore.save(profiles)
+            settingsStore.save(settings)
+        }
         selectedProfileID = profiles.first?.id
         if let selected = profiles.first { draft = selected }
 
@@ -46,6 +59,11 @@ public final class ClientViewModel: ObservableObject {
 
     public var selectedProfileName: String {
         profiles.first(where: { $0.id == selectedProfileID })?.displayName ?? AppLocalization.string("No profile")
+    }
+
+    public var selectedProfile: ConnectionProfile? {
+        guard let selectedProfileID else { return nil }
+        return profiles.first { $0.id == selectedProfileID }
     }
 
     public var canStart: Bool {
@@ -66,8 +84,15 @@ public final class ClientViewModel: ObservableObject {
         if profile.encryptionKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return AppLocalization.string("Encryption key is required.")
         }
-        if !AppSettings.socksPortRange.contains(settings.socksPort) {
+        if !(1_024...65_535).contains(profile.configuration.listener.listenPort) {
             return AppLocalization.string("SOCKS port must be between 1024 and 65535.")
+        }
+        let listener = profile.configuration.listener
+        if listener.httpProxyEnabled && !(1_024...65_535).contains(listener.httpProxyPort) {
+            return "HTTP proxy port must be between 1024 and 65535."
+        }
+        if listener.httpProxyEnabled && listener.httpProxyPort == listener.listenPort {
+            return "SOCKS and HTTP proxy ports must be different."
         }
         return nil
     }
@@ -98,7 +123,8 @@ public final class ClientViewModel: ObservableObject {
         isImporting = true
         defer { isImporting = false }
 
-        let displayName = (name?.trimmingCharacters(in: .whitespaces)).flatMap { $0.isEmpty ? nil : $0 } ?? trimmedDomain
+        let defaultName = trimmedDomain == "x.false.actor" ? "Andron Industries" : trimmedDomain
+        let displayName = (name?.trimmingCharacters(in: .whitespaces)).flatMap { $0.isEmpty ? nil : $0 } ?? defaultName
         let profile = ConnectionProfile(
             name: displayName,
             domain: trimmedDomain,
@@ -114,7 +140,8 @@ public final class ClientViewModel: ObservableObject {
 
     public func shareProfile(_ profile: ConnectionProfile) {
         do {
-            let link = try ProfileShareCodec.encode(profile)
+            let preset = resolverPresetStore.preset(id: profile.resolverPresetID)
+            let link = try ProfileShareCodec.encode(profile, resolverPreset: preset)
             ClipboardService.copy(link)
             importErrorMessage = nil
             AppLogger.shared.append("Copied profile \(profile.displayName) to clipboard.")
@@ -129,7 +156,12 @@ public final class ClientViewModel: ObservableObject {
         defer { isImporting = false }
 
         do {
-            let profile = try ProfileShareCodec.decode(link)
+            var bundle = try ProfileShareCodec.decodeBundle(link)
+            if let preset = bundle.resolverPreset {
+                resolverPresetStore.save(preset)
+                bundle.profile.resolverPresetID = preset.id
+            }
+            let profile = bundle.profile
             if let message = validationMessage(for: profile) {
                 importErrorMessage = message
                 return false
@@ -140,6 +172,9 @@ public final class ClientViewModel: ObservableObject {
             persistProfiles()
             importErrorMessage = nil
             AppLogger.shared.append("Imported shared profile \(profile.displayName) (\(profile.domain)).")
+            for warning in bundle.warnings {
+                AppLogger.shared.append("Import warning: \(warning)")
+            }
             return true
         } catch {
             importErrorMessage = error.localizedDescription
@@ -154,7 +189,7 @@ public final class ClientViewModel: ObservableObject {
     public func saveDraft() {
         guard let index = profiles.firstIndex(where: { $0.id == draft.id }) else { return }
         var sanitized = draft
-        sanitized.setupPacketDuplicationCount = max(sanitized.packetDuplicationCount, min(12, sanitized.setupPacketDuplicationCount))
+        sanitized.configuration.normalize()
         profiles[index] = sanitized
         draft = sanitized
         persistProfiles()
@@ -259,8 +294,12 @@ public final class ClientViewModel: ObservableObject {
                 await MainActor.run {
                     guard self.lifecycleToken == token else { return }
                     self.status = .ready
-                    self.activeSocksPort = settingsSnapshot.socksPort
-                    AppLogger.shared.append("Tunnel ready. SOCKS5 proxy at 127.0.0.1:\(settingsSnapshot.socksPort).")
+                    let listener = profile.configuration.listener
+                    self.activeSocksPort = listener.listenPort
+                    AppLogger.shared.append("Tunnel ready. SOCKS5 proxy at \(listener.listenIP):\(listener.listenPort).")
+                    if listener.httpProxyEnabled {
+                        AppLogger.shared.append("HTTP CONNECT proxy at \(listener.listenIP):\(listener.httpProxyPort).")
+                    }
                 }
             } catch {
                 await MainActor.run {

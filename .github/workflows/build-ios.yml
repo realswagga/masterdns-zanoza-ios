@@ -1,0 +1,95 @@
+name: Build unsigned iOS IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - codex/resolver-manager
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-and-build:
+    runs-on: macos-15
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Install Go 1.25
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: masterdns/go.mod
+          cache-dependency-path: masterdns/go.sum
+
+      - name: Install Apple build tools
+        run: |
+          brew install xcodegen
+          go install golang.org/x/mobile/cmd/gomobile@v0.0.0-20260520154334-0e4426e1883d
+          gomobile init
+
+      - name: Test MasterDNS core
+        working-directory: masterdns
+        run: go test ./...
+
+      - name: Build gomobile XCFramework
+        run: apple/Scripts/build-xcframework.sh
+
+      - name: Generate Xcode project
+        run: apple/Scripts/prepare-xcode.sh
+
+      - name: Test Swift package
+        working-directory: apple
+        run: swift test --parallel
+
+      - name: Compile iOS app for simulator
+        run: |
+          xcodebuild \
+            -project apple/Zanoza.xcodeproj \
+            -scheme Zanoza \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build
+
+      - name: Build unsigned device IPA
+        run: apple/Scripts/build-ios-unsigned-local-ipa.sh
+
+      - name: Prepare checksums and provenance
+        run: |
+          mkdir -p artifacts
+          cp apple/.build/ios-unsigned-local/Zanoza-unsigned.ipa artifacts/Zanoza-Andron-unsigned.ipa
+          shasum -a 256 artifacts/Zanoza-Andron-unsigned.ipa > artifacts/Zanoza-Andron-unsigned.ipa.sha256
+          {
+            echo "repository=${GITHUB_REPOSITORY}"
+            echo "commit=${GITHUB_SHA}"
+            echo "workflow_run=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo "runner=${RUNNER_OS}-${RUNNER_ARCH}"
+            xcodebuild -version | tr '\n' ' '
+            echo
+            go version
+            gomobile version
+          } > artifacts/provenance.txt
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Zanoza-Andron-unsigned-${{ github.sha }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 14

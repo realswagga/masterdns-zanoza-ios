@@ -49,6 +49,18 @@ public enum ResolverListService {
         return try remoteResolverText(from: [provider.source, ResolverCatalog.yandexSource], fetch: fetcher)
     }
 
+    public static func resolve(
+        profile: ConnectionProfile,
+        settings: AppSettings,
+        presetStore: ResolverPresetStore = .shared,
+        fetch: TextFetcher? = nil
+    ) throws -> String {
+        if let preset = presetStore.preset(id: profile.resolverPresetID), !preset.endpoints.isEmpty {
+            return preset.resolverText
+        }
+        return try resolve(settings: settings, fetch: fetch)
+    }
+
     private static func remoteResolverText(from sources: [ResolverSource], fetch: TextFetcher) throws -> String {
         var seen = Set<String>()
         var combined: [String] = []

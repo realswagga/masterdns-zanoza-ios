@@ -46,6 +46,11 @@ type Client struct {
 	resolverAddrMu    sync.RWMutex
 	resolverAddrCache map[string]*net.UDPAddr
 	nowFn             func() time.Time
+	initialReady      chan struct{}
+	initialReadyOnce  sync.Once
+	stopped           chan struct{}
+	stoppedOnce       sync.Once
+	runtimeReady      atomic.Bool
 
 	// MTU States
 	syncedUploadMTU                       int
@@ -103,8 +108,9 @@ type Client struct {
 	tunnelPacketTimeout  time.Duration
 
 	// Local Proxy Daemons
-	tcpListener *TCPListener
-	dnsListener *DNSListener
+	tcpListener  *TCPListener
+	httpListener *TCPListener
+	dnsListener  *DNSListener
 
 	// Stream Management
 	streamsMu             sync.RWMutex
@@ -266,6 +272,8 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 		},
 		resolverConns:                         make(map[string]chan pooledUDPConn),
 		resolverAddrCache:                     make(map[string]*net.UDPAddr),
+		initialReady:                          make(chan struct{}),
+		stopped:                               make(chan struct{}),
 		mtuTestRetries:                        cfg.MTUTestRetries,
 		mtuTestTimeout:                        time.Duration(cfg.MTUTestTimeout * float64(time.Second)),
 		mtuSaveToFile:                         cfg.SaveMTUServersToFile,
@@ -459,6 +467,7 @@ func (c *Client) Run(ctx context.Context) error {
 					c.log.Errorf("<red>❌ Async Runtime failed to launch: %v</red>", err)
 					return err
 				}
+				c.markRuntimeReady()
 
 				c.InitVirtualStream0()
 

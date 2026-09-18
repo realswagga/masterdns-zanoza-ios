@@ -246,6 +246,44 @@ AUTO_DISABLE_TIMEOUT_WINDOW_SECONDS = 3.0
 	}
 }
 
+func TestFinalizeClientConfigValidatesCompatibilityListeners(t *testing.T) {
+	cfg := defaultClientConfig()
+	cfg.ConfigDir = t.TempDir()
+	if err := os.WriteFile(filepath.Join(cfg.ConfigDir, "client_resolvers.txt"), []byte("8.8.8.8\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Domains = []string{"x.example.com"}
+	cfg.EncryptionKey = "test-key"
+	cfg.HTTPProxyEnabled = true
+	cfg.ListenPort = 41080
+	cfg.HTTPProxyPort = 41080
+	if _, err := finalizeClientConfig(cfg); err == nil {
+		t.Fatal("expected matching SOCKS and HTTP listener ports to be rejected")
+	}
+
+	cfg.HTTPProxyPort = 41081
+	cfg.LocalHandshakeTimeoutSec = 0
+	finalized, err := finalizeClientConfig(cfg)
+	if err != nil {
+		t.Fatalf("finalize compatibility config: %v", err)
+	}
+	if !finalized.HTTPProxyEnabled || finalized.HTTPProxyPort != 41081 {
+		t.Fatalf("unexpected HTTP proxy config: enabled=%v port=%d", finalized.HTTPProxyEnabled, finalized.HTTPProxyPort)
+	}
+	if finalized.LocalHandshakeTimeoutSec != 30 {
+		t.Fatalf("handshake timeout = %v, want default 30", finalized.LocalHandshakeTimeoutSec)
+	}
+
+	cfg.LocalHandshakeTimeoutSec = 999
+	finalized, err = finalizeClientConfig(cfg)
+	if err != nil {
+		t.Fatalf("finalize clamped compatibility config: %v", err)
+	}
+	if finalized.LocalHandshakeTimeoutSec != 300 {
+		t.Fatalf("handshake timeout = %v, want clamp 300", finalized.LocalHandshakeTimeoutSec)
+	}
+}
+
 func TestLoadClientConfigUsesMergedRX_TX_Workers(t *testing.T) {
 	dir := t.TempDir()
 

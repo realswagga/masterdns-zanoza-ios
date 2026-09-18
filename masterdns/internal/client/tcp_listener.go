@@ -173,6 +173,10 @@ func (l *TCPListener) handleConnection(ctx context.Context, conn net.Conn, proto
 		l.client.HandleSOCKS5(ctx, conn)
 		return
 	}
+	if protocolType == "HTTP" {
+		l.client.HandleHTTPConnect(ctx, conn)
+		return
+	}
 
 	l.client.HandleTCPConnect(ctx, conn)
 }

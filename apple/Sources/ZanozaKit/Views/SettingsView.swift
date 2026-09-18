@@ -21,35 +21,6 @@ public struct SettingsView: View {
     public var body: some View {
         Form {
             Section {
-                SocksPortRow(value: $settings.socksPort)
-                Toggle(AppLocalization.string("Require username/password"), isOn: $settings.socksAuthEnabled)
-                if settings.socksAuthEnabled {
-                    TextField(AppLocalization.string("Username"), text: $settings.socksUser)
-                        .zanozaPlainInput()
-                        .onSubmit(onCommit)
-                    SecureField(AppLocalization.string("Password"), text: $settings.socksPass)
-                        .zanozaPlainInput()
-                        .onSubmit(onCommit)
-                }
-            } header: {
-                Text(AppLocalization.string("SOCKS5 proxy"))
-            } footer: {
-                if isTunnelRunning {
-                    Text(AppLocalization.string("Changes apply after reconnecting."))
-                        .foregroundStyle(.orange)
-                }
-            }
-
-            Section {
-                Toggle(AppLocalization.string("Route system traffic through VPN"), isOn: $settings.systemVPNEnabled)
-            } header: {
-                Text(AppLocalization.string("VPN profile"))
-            } footer: {
-                Text(AppLocalization.string("Apple-signed builds only. Enabling the VPN profile on an unsigned build will require a reinstall."))
-                    .foregroundColor(.orange)
-            }
-
-            Section {
                 ResolverProviderPicker(
                     selection: $settings.resolverProviderID,
                     isDisabled: settings.useFastResolvers
@@ -195,65 +166,6 @@ private struct ResolverProviderPicker: View {
             get: { AppSettings.normalizedResolverProviderID(selection) },
             set: { selection = AppSettings.normalizedResolverProviderID($0) }
         )
-    }
-}
-
-private struct SocksPortRow: View {
-    @Binding var value: Int
-    @FocusState private var isFocused: Bool
-    @State private var text: String = ""
-
-    var body: some View {
-        HStack {
-            Text(AppLocalization.string("SOCKS port"))
-            Spacer(minLength: 12)
-            TextField("", text: textBinding)
-                .multilineTextAlignment(.trailing)
-                .focused($isFocused)
-                .frame(width: 92)
-                #if os(iOS)
-                .keyboardType(.numberPad)
-                .textFieldStyle(.plain)
-                #else
-                .textFieldStyle(.plain)
-                #endif
-            Stepper("", value: clampedValue, in: AppSettings.socksPortRange)
-                .labelsHidden()
-                .fixedSize()
-        }
-        .onAppear { text = "\(value)" }
-        .onChange(of: value) { newValue in
-            if !isFocused { text = "\(newValue)" }
-        }
-        .onChange(of: isFocused) { focused in
-            if !focused { commit() }
-        }
-    }
-
-    private var textBinding: Binding<String> {
-        Binding(
-            get: { text.isEmpty && !isFocused ? "\(value)" : text },
-            set: { text = $0.filter(\.isNumber) }
-        )
-    }
-
-    private var clampedValue: Binding<Int> {
-        Binding(
-            get: { value },
-            set: { newValue in
-                let clamped = AppSettings.clampedSocksPort(newValue)
-                value = clamped
-                text = "\(clamped)"
-            }
-        )
-    }
-
-    private func commit() {
-        let digits = text.filter(\.isNumber)
-        if let parsed = Int(digits) {
-            value = AppSettings.clampedSocksPort(parsed)
-        }
-        text = "\(value)"
     }
 }
 

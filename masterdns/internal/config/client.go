@@ -36,6 +36,10 @@ type ClientConfig struct {
 	SOCKS5Auth                            bool              `toml:"SOCKS5_AUTH"`
 	SOCKS5User                            string            `toml:"SOCKS5_USER"`
 	SOCKS5Pass                            string            `toml:"SOCKS5_PASS"`
+	HTTPProxyEnabled                      bool              `toml:"HTTP_PROXY_ENABLED"`
+	HTTPProxyPort                         int               `toml:"HTTP_PROXY_PORT"`
+	SocksOptimisticConnect                bool              `toml:"SOCKS_OPTIMISTIC_CONNECT"`
+	LocalHandshakeTimeoutSec              float64           `toml:"LOCAL_HANDSHAKE_TIMEOUT_SECONDS"`
 	LocalDNSEnabled                       bool              `toml:"LOCAL_DNS_ENABLED"`
 	LocalDNSIP                            string            `toml:"LOCAL_DNS_IP"`
 	LocalDNSPort                          int               `toml:"LOCAL_DNS_PORT"`
@@ -138,6 +142,10 @@ func defaultClientConfig() ClientConfig {
 		SOCKS5Auth:                            false,
 		SOCKS5User:                            "master_dns_vpn",
 		SOCKS5Pass:                            "master_dns_vpn",
+		HTTPProxyEnabled:                      false,
+		HTTPProxyPort:                         18001,
+		SocksOptimisticConnect:                false,
+		LocalHandshakeTimeoutSec:              30.0,
 		LocalDNSEnabled:                       false,
 		LocalDNSIP:                            "127.0.0.1",
 		LocalDNSPort:                          53,
@@ -364,6 +372,14 @@ func finalizeClientConfig(cfg ClientConfig) (ClientConfig, error) {
 	if cfg.SOCKS5Auth && cfg.SOCKS5User == "" {
 		return cfg, fmt.Errorf("SOCKS5_AUTH requires SOCKS5_USER")
 	}
+
+	if cfg.HTTPProxyPort < 0 || cfg.HTTPProxyPort > 65535 {
+		return cfg, fmt.Errorf("invalid HTTP_PROXY_PORT: %d", cfg.HTTPProxyPort)
+	}
+	if cfg.HTTPProxyEnabled && cfg.HTTPProxyPort == cfg.ListenPort {
+		return cfg, fmt.Errorf("HTTP_PROXY_PORT must differ from LISTEN_PORT")
+	}
+	cfg.LocalHandshakeTimeoutSec = clampFloat(defaultFloatAtMostZero(cfg.LocalHandshakeTimeoutSec, 30.0), 1.0, 300.0)
 
 	cfg.LocalDNSIP = defaultString(strings.TrimSpace(cfg.LocalDNSIP), "127.0.0.1")
 

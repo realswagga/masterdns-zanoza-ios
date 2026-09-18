@@ -1,11 +1,10 @@
 import Foundation
 
 // Default list of recursive resolvers used when AppSettings.customResolvers
-// is empty. Curated to Yandex DNS only — these consistently return the
-// highest download MTU (3604 in our measurements), pinning the per-tunnel
-// "Synced Download MTU" floor several × higher than mixed lists do, which
-// directly raises throughput. Users can override per-profile via Settings →
-// Resolvers.
+// is empty. Curated to Yandex DNS only as a broadly reachable bootstrap pool;
+// performance is network-specific and the false.actor server currently caps
+// negotiated download MTU at 2048. Users should import and evaluate their own
+// operator-local pool in the per-profile resolver manager.
 public enum DefaultResolvers {
     public static let text: String = """
     # Yandex

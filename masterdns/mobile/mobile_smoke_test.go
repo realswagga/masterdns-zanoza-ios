@@ -22,6 +22,10 @@ LISTEN_PORT = 41080
 SOCKS5_AUTH = false
 SOCKS5_USER = "zanoza"
 SOCKS5_PASS = "zanoza"
+HTTP_PROXY_ENABLED = true
+HTTP_PROXY_PORT = 41081
+SOCKS_OPTIMISTIC_CONNECT = true
+LOCAL_HANDSHAKE_TIMEOUT_SECONDS = 30.0
 
 LOCAL_DNS_ENABLED = false
 LOCAL_DNS_IP = "127.0.0.1"
@@ -130,6 +134,9 @@ func TestZanozaGeneratedConfigLoads(t *testing.T) {
 	}
 	if cfg.ProtocolType != "SOCKS5" {
 		t.Errorf("ProtocolType: got %q want SOCKS5", cfg.ProtocolType)
+	}
+	if !cfg.HTTPProxyEnabled || cfg.HTTPProxyPort != 41081 || !cfg.SocksOptimisticConnect {
+		t.Errorf("compatibility listeners were not loaded: enabled=%v port=%d optimistic=%v", cfg.HTTPProxyEnabled, cfg.HTTPProxyPort, cfg.SocksOptimisticConnect)
 	}
 	if len(cfg.Domains) != 1 || cfg.Domains[0] != "v.example.com" {
 		t.Errorf("Domains: got %v", cfg.Domains)

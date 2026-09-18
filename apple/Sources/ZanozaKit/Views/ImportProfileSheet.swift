@@ -136,9 +136,9 @@ public struct ImportProfileLinkSheet: View {
                         .autocorrectionDisabled()
                         #endif
                 } header: {
-                    Text(AppLocalization.string("Profile sharing link"))
+                    Text("Profile or configuration")
                 } footer: {
-                    Text(AppLocalization.string("Paste a Zanoza profile sharing link."))
+                    Text("Paste a Zanoza link, Base64/JSON profile, MasterDNS TOML, or KEY = VALUE configuration.")
                 }
             }
             .formStyle(.grouped)

@@ -4,12 +4,14 @@ package mobile
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime/debug"
 	"sync"
+	"time"
 
 	"masterdnsvpn-go/internal/client"
 	"masterdnsvpn-go/internal/config"
@@ -64,9 +66,11 @@ type LogWriter interface {
 var (
 	mu         sync.Mutex
 	cancelFn   context.CancelFunc
+	scanCancel context.CancelFunc
 	runningWG  sync.WaitGroup
 	stdoutPump *stdoutInterceptor
 	writerRef  LogWriter
+	appRef     *client.Client
 )
 
 // SetLogWriter installs a writer that will receive both stdout lines emitted
@@ -85,6 +89,12 @@ func IsRunning() bool {
 	return cancelFn != nil
 }
 
+func IsScanning() bool {
+	mu.Lock()
+	defer mu.Unlock()
+	return scanCancel != nil
+}
+
 // Start launches the MasterDnsVPN client with the given TOML config and
 // newline-delimited resolver list. runtimeDir is a writable directory where
 // transient files (config copies, dns cache) will live.
@@ -93,9 +103,9 @@ func IsRunning() bool {
 // continues running in a background goroutine until Stop is called.
 func Start(configTOML, resolversText, runtimeDir string) error {
 	mu.Lock()
-	if cancelFn != nil {
+	if cancelFn != nil || scanCancel != nil {
 		mu.Unlock()
-		return errors.New("client already running")
+		return errors.New("client or resolver scan already running")
 	}
 	mu.Unlock()
 
@@ -139,12 +149,14 @@ func Start(configTOML, resolversText, runtimeDir string) error {
 	mu.Lock()
 	cancelFn = cancel
 	stdoutPump = pump
+	appRef = app
 	mu.Unlock()
 
 	runningWG.Add(1)
 	go func() {
 		defer runningWG.Done()
 		defer app.Cleanup()
+		defer app.SignalStopped()
 		defer func() {
 			if r := recover(); r != nil {
 				emit(fmt.Sprintf("client panic: %v\n%s", r, debug.Stack()))
@@ -175,6 +187,31 @@ func Start(configTOML, resolversText, runtimeDir string) error {
 	return nil
 }
 
+// WaitUntilReady blocks until MTU discovery, session initialization, and local
+// proxy listener startup have all completed. This prevents iOS consumers from
+// caching an early connection failure while Zanoza is still scanning.
+func WaitUntilReady(timeoutSeconds float64) error {
+	mu.Lock()
+	app := appRef
+	mu.Unlock()
+	if app == nil {
+		return errors.New("client is not running")
+	}
+	if timeoutSeconds <= 0 {
+		timeoutSeconds = 300
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSeconds*float64(time.Second)))
+	defer cancel()
+	return app.WaitUntilReady(ctx)
+}
+
+func RuntimeReady() bool {
+	mu.Lock()
+	app := appRef
+	mu.Unlock()
+	return app != nil && app.RuntimeReady()
+}
+
 // Stop signals the running client to exit and waits briefly for shutdown.
 // Safe to call when the client is not running.
 func Stop() {
@@ -183,6 +220,7 @@ func Stop() {
 	pump := stdoutPump
 	cancelFn = nil
 	stdoutPump = nil
+	appRef = nil
 	mu.Unlock()
 
 	if cancel == nil {
@@ -194,6 +232,92 @@ func Stop() {
 		pump.stop()
 	}
 	emit("Zanoza tunnel stopped.")
+}
+
+type resolverScanPayload struct {
+	Version int                            `json:"version"`
+	Error   string                         `json:"error,omitempty"`
+	Results []client.ResolverMTUScanResult `json:"results"`
+}
+
+// ScanResolvers runs MasterDNS-native encrypted MTU probes without opening a
+// local proxy or creating a full session. The result is JSON so gomobile can
+// expose a stable primitive API to Swift.
+func ScanResolvers(configTOML, resolversText, runtimeDir string, timeoutSeconds float64) (string, error) {
+	mu.Lock()
+	if cancelFn != nil || scanCancel != nil {
+		mu.Unlock()
+		return "", errors.New("client or resolver scan already running")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	scanCancel = cancel
+	mu.Unlock()
+
+	defer func() {
+		mu.Lock()
+		scanCancel = nil
+		mu.Unlock()
+	}()
+	if runtimeDir == "" {
+		return "", errors.New("runtimeDir is required")
+	}
+	if timeoutSeconds > 0 {
+		var timeoutCancel context.CancelFunc
+		ctx, timeoutCancel = context.WithTimeout(ctx, time.Duration(timeoutSeconds*float64(time.Second)))
+		defer timeoutCancel()
+	}
+
+	scanDir := filepath.Join(runtimeDir, "resolver-scan")
+	if err := os.MkdirAll(scanDir, 0o755); err != nil {
+		return "", fmt.Errorf("create scan runtime dir: %w", err)
+	}
+	configPath := filepath.Join(scanDir, "client_config.toml")
+	resolversPath := filepath.Join(scanDir, "client_resolvers.txt")
+	if err := os.WriteFile(configPath, []byte(configTOML), 0o600); err != nil {
+		return "", fmt.Errorf("write scan config: %w", err)
+	}
+	if err := os.WriteFile(resolversPath, []byte(resolversText), 0o600); err != nil {
+		return "", fmt.Errorf("write scan resolvers: %w", err)
+	}
+
+	pump := newStdoutInterceptor(func(line string) {
+		mu.Lock()
+		w := writerRef
+		mu.Unlock()
+		if w != nil {
+			w.WriteLog(line)
+		}
+	})
+	if err := pump.start(); err != nil {
+		return "", fmt.Errorf("install stdout interceptor: %w", err)
+	}
+	defer pump.stop()
+
+	app, err := client.Bootstrap(configPath, "", config.ClientConfigOverrides{Values: map[string]any{}})
+	if err != nil {
+		return "", fmt.Errorf("bootstrap resolver scan: %w", err)
+	}
+	defer app.Cleanup()
+
+	results, scanErr := app.RunResolverMTUScan(ctx)
+	payload := resolverScanPayload{Version: 1, Results: results}
+	if scanErr != nil {
+		payload.Error = scanErr.Error()
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("encode resolver scan: %w", err)
+	}
+	return string(encoded), nil
+}
+
+func CancelScan() {
+	mu.Lock()
+	cancel := scanCancel
+	mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
 func emit(line string) {

@@ -56,6 +56,10 @@ const (
 	SOCKS5_USER_AUTH_VERSION = 0x01
 	SOCKS5_USER_AUTH_SUCCESS = 0x00
 	SOCKS5_USER_AUTH_FAILURE = 0x01
+
+	// Internal marker for the optional local HTTP CONNECT listener. It never
+	// crosses the MasterDNS wire; remote streams still use PACKET_SOCKS5_SYN.
+	LOCAL_PROXY_HTTP = 0x48
 )
 
 var errLateSocksResult = errors.New("late socks result for closed or terminal local stream")
@@ -68,8 +72,40 @@ func (c *Client) supportsSOCKS4() bool {
 	return c.cfg.SOCKS5User != "" && c.cfg.SOCKS5Pass == ""
 }
 
+// selectSOCKS5AuthMethod deliberately accepts RFC 1929 negotiation when local
+// authentication is disabled. Some subscription parsers turn an empty
+// `socks://:@127.0.0.1` user-info component into a user/password-only SOCKS
+// greeting. The listener is local-only by default and disabling authentication
+// already grants every local caller access, so accepting that wire shape does
+// not broaden the configured trust boundary.
+func (c *Client) selectSOCKS5AuthMethod(methods []byte) byte {
+	if c.cfg.SOCKS5Auth {
+		if slices.Contains(methods, SOCKS5_AUTH_METHOD_USER_PASS) {
+			return SOCKS5_AUTH_METHOD_USER_PASS
+		}
+		return SOCKS5_AUTH_METHOD_NO_ACCEPTABLE
+	}
+	if slices.Contains(methods, SOCKS5_AUTH_METHOD_NO_AUTH) {
+		return SOCKS5_AUTH_METHOD_NO_AUTH
+	}
+	if slices.Contains(methods, SOCKS5_AUTH_METHOD_USER_PASS) {
+		return SOCKS5_AUTH_METHOD_USER_PASS
+	}
+	return SOCKS5_AUTH_METHOD_NO_ACCEPTABLE
+}
+
+func (c *Client) acceptSOCKS5Credentials(user, pass string) bool {
+	return !c.cfg.SOCKS5Auth || (user == c.cfg.SOCKS5User && pass == c.cfg.SOCKS5Pass)
+}
+
 // HandleSOCKS5 manages the local SOCKS handshake and supports SOCKS4/4a and SOCKS5.
 func (c *Client) HandleSOCKS5(ctx context.Context, conn net.Conn) {
+	if conn == nil {
+		return
+	}
+	_ = conn.SetDeadline(time.Now().Add(c.localHandshakeTimeout()))
+	defer func() { _ = conn.SetDeadline(time.Time{}) }()
+
 	// Rate-limit check: reject immediately if IP is banned.
 	if c.socksRateLimit != nil {
 		ip := extractIP(conn)
@@ -113,16 +149,7 @@ func (c *Client) handleSOCKS5Request(ctx context.Context, conn net.Conn) {
 		return
 	}
 
-	methodSelected := byte(SOCKS5_AUTH_METHOD_NO_ACCEPTABLE)
-	if c.cfg.SOCKS5Auth {
-		if slices.Contains(methods, SOCKS5_AUTH_METHOD_USER_PASS) {
-			methodSelected = SOCKS5_AUTH_METHOD_USER_PASS
-		}
-	} else {
-		if slices.Contains(methods, SOCKS5_AUTH_METHOD_NO_AUTH) {
-			methodSelected = SOCKS5_AUTH_METHOD_NO_AUTH
-		}
-	}
+	methodSelected := c.selectSOCKS5AuthMethod(methods)
 
 	_, _ = conn.Write([]byte{SOCKS5_VERSION, methodSelected})
 	if methodSelected == SOCKS5_AUTH_METHOD_NO_ACCEPTABLE {
@@ -160,7 +187,7 @@ func (c *Client) handleSOCKS5Request(ctx context.Context, conn net.Conn) {
 			return
 		}
 
-		if string(user) != c.cfg.SOCKS5User || string(pass) != c.cfg.SOCKS5Pass {
+		if !c.acceptSOCKS5Credentials(string(user), string(pass)) {
 			_, _ = conn.Write([]byte{SOCKS5_USER_AUTH_VERSION, SOCKS5_USER_AUTH_FAILURE})
 			ip := extractIP(conn)
 			banned := false
@@ -176,7 +203,7 @@ func (c *Client) handleSOCKS5Request(ctx context.Context, conn net.Conn) {
 			return
 		}
 
-		if c.socksRateLimit != nil {
+		if c.cfg.SOCKS5Auth && c.socksRateLimit != nil {
 			c.socksRateLimit.RecordSuccess(extractIP(conn))
 		}
 
@@ -331,17 +358,15 @@ func (c *Client) handleSOCKSConnect(ctx context.Context, conn net.Conn, addr str
 	streamID, ok := c.get_new_stream_id()
 	if !ok {
 		c.log.Errorf("❌ <red>Failed to get new Stream ID for SOCKS CONNECT</red>")
-		if socksVersion == SOCKS4_VERSION {
-			_ = c.sendSocks4Reply(conn, false)
-		} else {
-			_ = c.sendSocksReply(conn, SOCKS5_REPLY_GENERAL_FAILURE, SOCKS5_ATYP_IPV4, net.IPv4zero, 0)
-		}
+		_ = c.sendLocalConnectReply(conn, socksVersion, SOCKS5_REPLY_GENERAL_FAILURE)
 		return
 	}
 
 	socksLabel := "SOCKS5"
 	if socksVersion == SOCKS4_VERSION {
 		socksLabel = "SOCKS4"
+	} else if socksVersion == LOCAL_PROXY_HTTP {
+		socksLabel = "HTTP CONNECT"
 	}
 
 	c.log.Infof("🔌 <green>New %s TCP CONNECT to <cyan>%s:%d</cyan>, Stream ID: <cyan>%d</cyan></green>", socksLabel, addr, port, streamID)
@@ -352,11 +377,7 @@ func (c *Client) handleSOCKSConnect(ctx context.Context, conn net.Conn, addr str
 	case SOCKS5_ATYP_IPV4:
 		ip4 := net.ParseIP(addr).To4()
 		if ip4 == nil {
-			if socksVersion == SOCKS4_VERSION {
-				_ = c.sendSocks4Reply(conn, false)
-			} else {
-				_ = c.sendSocksReply(conn, SOCKS5_REPLY_HOST_UNREACHABLE, SOCKS5_ATYP_IPV4, net.IPv4zero, 0)
-			}
+			_ = c.sendLocalConnectReply(conn, socksVersion, SOCKS5_REPLY_HOST_UNREACHABLE)
 			_ = conn.Close()
 			return
 		}
@@ -367,11 +388,7 @@ func (c *Client) handleSOCKSConnect(ctx context.Context, conn net.Conn, addr str
 	case SOCKS5_ATYP_IPV6:
 		ip6 := net.ParseIP(addr).To16()
 		if ip6 == nil {
-			if socksVersion == SOCKS4_VERSION {
-				_ = c.sendSocks4Reply(conn, false)
-			} else {
-				_ = c.sendSocksReply(conn, SOCKS5_REPLY_HOST_UNREACHABLE, SOCKS5_ATYP_IPV4, net.IPv4zero, 0)
-			}
+			_ = c.sendLocalConnectReply(conn, socksVersion, SOCKS5_REPLY_HOST_UNREACHABLE)
 			_ = conn.Close()
 			return
 		}
@@ -384,11 +401,7 @@ func (c *Client) handleSOCKSConnect(ctx context.Context, conn net.Conn, addr str
 
 	s := c.new_stream(streamID, conn, nil)
 	if s == nil {
-		if socksVersion == SOCKS4_VERSION {
-			_ = c.sendSocks4Reply(conn, false)
-		} else {
-			_ = c.sendSocksReply(conn, SOCKS5_REPLY_GENERAL_FAILURE, SOCKS5_ATYP_IPV4, net.IPv4zero, 0)
-		}
+		_ = c.sendLocalConnectReply(conn, socksVersion, SOCKS5_REPLY_GENERAL_FAILURE)
 		return
 	}
 
@@ -415,6 +428,17 @@ func (c *Client) handleSOCKSConnect(ctx context.Context, conn net.Conn, addr str
 			nil,
 			120*time.Second,
 		)
+	}
+
+	if c.cfg.SocksOptimisticConnect {
+		s.socksResultMu.Lock()
+		if !s.LocalConnectReplySent {
+			if err := c.sendLocalConnectReply(s.NetConn, s.LocalSocksVersion, SOCKS5_REPLY_SUCCESS); err == nil {
+				s.LocalConnectReplySent = true
+				c.log.Infof("⚡ <green>Optimistic %s acknowledgement sent for stream <cyan>%d</cyan></green>", socksLabel, streamID)
+			}
+		}
+		s.socksResultMu.Unlock()
 	}
 }
 
@@ -445,10 +469,11 @@ func (c *Client) writeSocksConnectResultLocked(s *Stream_client, rep byte) error
 	}
 
 	var err error
-	if s.LocalSocksVersion == SOCKS4_VERSION {
-		err = c.sendSocks4Reply(s.NetConn, rep == SOCKS5_REPLY_SUCCESS)
-	} else {
-		err = c.sendSocksReply(s.NetConn, rep, SOCKS5_ATYP_IPV4, net.IPv4zero, 0)
+	if !s.LocalConnectReplySent {
+		err = c.sendLocalConnectReply(s.NetConn, s.LocalSocksVersion, rep)
+		if err == nil {
+			s.LocalConnectReplySent = true
+		}
 	}
 
 	if err != nil {
@@ -551,6 +576,33 @@ func (c *Client) sendSocks4Reply(conn net.Conn, success bool) error {
 	}
 	_, err := conn.Write([]byte{0x00, replyCode, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00})
 	return err
+}
+
+func (c *Client) sendLocalConnectReply(conn net.Conn, protocol byte, rep byte) error {
+	if conn == nil {
+		return net.ErrClosed
+	}
+	switch protocol {
+	case SOCKS4_VERSION:
+		return c.sendSocks4Reply(conn, rep == SOCKS5_REPLY_SUCCESS)
+	case LOCAL_PROXY_HTTP:
+		if rep == SOCKS5_REPLY_SUCCESS {
+			_, err := io.WriteString(conn, "HTTP/1.1 200 Connection Established\r\nProxy-Agent: Zanoza\r\n\r\n")
+			return err
+		}
+		_, err := io.WriteString(conn, "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+		return err
+	default:
+		return c.sendSocksReply(conn, rep, SOCKS5_ATYP_IPV4, net.IPv4zero, 0)
+	}
+}
+
+func (c *Client) localHandshakeTimeout() time.Duration {
+	seconds := c.cfg.LocalHandshakeTimeoutSec
+	if seconds <= 0 {
+		seconds = 30
+	}
+	return time.Duration(seconds * float64(time.Second))
 }
 
 func (c *Client) sendSocksReply(conn net.Conn, rep byte, atyp byte, bndAddr net.IP, bndPort uint16) error {
@@ -676,13 +728,13 @@ func (c *Client) handleSocksUDPAssociate(ctx context.Context, conn net.Conn, cli
 	// Track DNS queries that missed the cache so we can deliver their
 	// answers once the tunnel populates the cache asynchronously.
 	type pendingDNSQuery struct {
-		cacheKey  string
-		rawQuery  []byte
-		peerAddr  *net.UDPAddr
-		respATYP  byte
-		respAddr  string
-		respPort  uint16
-		deadline  time.Time
+		cacheKey string
+		rawQuery []byte
+		peerAddr *net.UDPAddr
+		respATYP byte
+		respAddr string
+		respPort uint16
+		deadline time.Time
 	}
 	var (
 		pendingMu sync.Mutex

@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 #if os(iOS)
 import UIKit
 #elseif os(macOS)
@@ -9,8 +10,10 @@ public struct ContentView: View {
     @StateObject private var viewModel: ClientViewModel
     @State private var isShowingImporter = false
     @State private var isShowingLinkImporter = false
+    @State private var isShowingConfigFileImporter = false
     @State private var isShowingLogs = false
     @State private var isShowingSettings = false
+    @State private var isShowingSpeedTest = false
     @State private var detailDestination: DetailDestination?
 
     @MainActor
@@ -31,7 +34,8 @@ public struct ContentView: View {
                 } else {
                     ProfilesHomeView(
                         viewModel: viewModel,
-                        onShowProfileDetails: showProfileDetails
+                        onShowProfileDetails: showProfileDetails,
+                        onShowSpeedTest: { isShowingSpeedTest = true }
                     )
                 }
             }
@@ -54,15 +58,10 @@ public struct ContentView: View {
                     }
                 }
                 ToolbarItemGroup(placement: .navigationBarTrailing) {
-                    Button {
-                        isShowingImporter = true
+                    Menu {
+                        importMenuItems
                     } label: {
                         Label(AppLocalization.string("Import"), systemImage: "square.and.arrow.down")
-                    }
-                    Button {
-                        isShowingLinkImporter = true
-                    } label: {
-                        Label(AppLocalization.string("Import from clipboard"), systemImage: "doc.on.clipboard")
                     }
                 }
                 #else
@@ -79,15 +78,10 @@ public struct ContentView: View {
                     }
                 }
                 ToolbarItemGroup(placement: .primaryAction) {
-                    Button {
-                        isShowingImporter = true
+                    Menu {
+                        importMenuItems
                     } label: {
                         Label(AppLocalization.string("Import"), systemImage: "square.and.arrow.down")
-                    }
-                    Button {
-                        isShowingLinkImporter = true
-                    } label: {
-                        Label(AppLocalization.string("Import from clipboard"), systemImage: "doc.on.clipboard")
                     }
                 }
                 #endif
@@ -103,6 +97,26 @@ public struct ContentView: View {
             ImportProfileLinkSheet(isImporting: viewModel.isImporting) { link in
                 if viewModel.importSharedProfile(link) { return nil }
                 return viewModel.importErrorMessage ?? AppLocalization.string("Invalid profile sharing link.")
+            }
+        }
+        .fileImporter(
+            isPresented: $isShowingConfigFileImporter,
+            allowedContentTypes: [.plainText, .json, .data],
+            allowsMultipleSelection: false
+        ) { result in
+            switch result {
+            case .success(let urls):
+                guard let url = urls.first else { return }
+                let accessing = url.startAccessingSecurityScopedResource()
+                defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+                do {
+                    let text = try String(contentsOf: url, encoding: .utf8)
+                    _ = viewModel.importSharedProfile(text)
+                } catch {
+                    viewModel.importErrorMessage = error.localizedDescription
+                }
+            case .failure(let error):
+                viewModel.importErrorMessage = error.localizedDescription
             }
         }
         .sheet(isPresented: $isShowingSettings) {
@@ -129,6 +143,13 @@ public struct ContentView: View {
             #if os(macOS)
             .frame(width: 480, height: 520)
             #endif
+        }
+        .sheet(isPresented: $isShowingSpeedTest) {
+            if let profile = viewModel.selectedProfile {
+                NavigationStack {
+                    ProxySpeedTestView(profile: profile, tunnelReady: viewModel.status == .ready)
+                }
+            }
         }
         .sheet(item: $detailDestination) { destination in
             detailView(for: destination)
@@ -162,6 +183,25 @@ public struct ContentView: View {
     }
 
     @ViewBuilder
+    private var importMenuItems: some View {
+        Button {
+            isShowingImporter = true
+        } label: {
+            Label("Enter server credentials", systemImage: "server.rack")
+        }
+        Button {
+            isShowingLinkImporter = true
+        } label: {
+            Label(AppLocalization.string("Import from clipboard"), systemImage: "doc.on.clipboard")
+        }
+        Button {
+            isShowingConfigFileImporter = true
+        } label: {
+            Label("Import configuration file", systemImage: "doc.badge.plus")
+        }
+    }
+
+    @ViewBuilder
     private func detailView(for destination: DetailDestination) -> some View {
         NavigationStack {
             switch destination {
@@ -187,7 +227,10 @@ private struct ProfileDetailScreen: View {
         ProfileEditorView(
             profile: $viewModel.draft,
             validationMessage: viewModel.validationMessage,
-            onCommit: viewModel.saveDraft
+            onCommit: viewModel.saveDraft,
+            isTunnelRunning: viewModel.status.isRunning,
+            physicalInterface: viewModel.physicalInterfaceMonitor.snapshot,
+            settings: viewModel.settings
         )
         .navigationTitle(viewModel.selectedProfileName)
         #if os(iOS)
@@ -207,10 +250,11 @@ private struct ProfileDetailScreen: View {
 private struct ProfilesHomeView: View {
     @ObservedObject var viewModel: ClientViewModel
     let onShowProfileDetails: (ConnectionProfile) -> Void
+    let onShowSpeedTest: () -> Void
 
     var body: some View {
         List {
-            ConnectionPanel(viewModel: viewModel)
+            ConnectionPanel(viewModel: viewModel, onShowSpeedTest: onShowSpeedTest)
                 .listRowSeparator(.hidden, edges: .bottom)
                 #if os(iOS)
                 .listRowInsets(EdgeInsets(top: 12, leading: 16, bottom: 12, trailing: 16))
@@ -261,6 +305,7 @@ private struct ProfilesHomeView: View {
 
 private struct ConnectionPanel: View {
     @ObservedObject var viewModel: ClientViewModel
+    let onShowSpeedTest: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -284,6 +329,15 @@ private struct ConnectionPanel: View {
                 }
                 .layoutPriority(1)
                 Spacer(minLength: 8)
+                if viewModel.status == .ready {
+                    Button(action: onShowSpeedTest) {
+                        Image(systemName: "gauge.with.dots.needle.67percent")
+                            .font(.system(size: 17, weight: .semibold))
+                            .frame(width: 34, height: 30)
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityLabel("Proxy speed test")
+                }
                 connectionButton
             }
 

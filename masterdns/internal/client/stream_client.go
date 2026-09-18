@@ -43,15 +43,16 @@ const (
 type Stream_client struct {
 	client *Client
 
-	StreamID           uint16
-	LocalSocksVersion  byte
-	NetConn            net.Conn
-	CreateTime         time.Time
-	LastActivityTime   time.Time
-	Status             string // PENDING, ACTIVE, CLOSED
-	Stream             any    // The ARQ object
-	StreamCreating     bool
-	PendingInboundData map[uint16][]byte
+	StreamID              uint16
+	LocalSocksVersion     byte
+	LocalConnectReplySent bool
+	NetConn               net.Conn
+	CreateTime            time.Time
+	LastActivityTime      time.Time
+	Status                string // PENDING, ACTIVE, CLOSED
+	Stream                any    // The ARQ object
+	StreamCreating        bool
+	PendingInboundData    map[uint16][]byte
 
 	// High-performance multi-level priority queue
 	txQueue *mlq.MultiLevelQueue[*clientStreamTXPacket]

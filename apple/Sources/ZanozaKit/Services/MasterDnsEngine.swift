@@ -28,6 +28,8 @@ public struct EngineStartOptions {
     public let boundInterface: String
     public let boundIPv4: String
     public let boundIPv6: String
+    public let resolversText: String?
+    public let readinessTimeoutSeconds: Double
 
     public init(
         profile: ConnectionProfile,
@@ -35,7 +37,9 @@ public struct EngineStartOptions {
         runtimeDirectory: URL,
         boundInterface: String = "",
         boundIPv4: String = "",
-        boundIPv6: String = ""
+        boundIPv6: String = "",
+        resolversText: String? = nil,
+        readinessTimeoutSeconds: Double = 300
     ) {
         self.profile = profile
         self.settings = settings
@@ -43,10 +47,12 @@ public struct EngineStartOptions {
         self.boundInterface = boundInterface
         self.boundIPv4 = boundIPv4
         self.boundIPv6 = boundIPv6
+        self.resolversText = resolversText
+        self.readinessTimeoutSeconds = readinessTimeoutSeconds
     }
 }
 
-public final class MasterDnsEngine {
+public final class MasterDnsEngine: @unchecked Sendable {
     private let lock = NSLock()
     private var currentSocksPort: Int?
     #if canImport(Mobile)
@@ -76,10 +82,15 @@ public final class MasterDnsEngine {
     }
 
     public func start(_ options: EngineStartOptions, log: @escaping (String) -> Void) throws {
-        try validate(options.profile, settings: options.settings)
+        try validate(options.profile)
 
         let configTOML = ConfigBuilder.buildTOML(for: options.profile, settings: options.settings)
-        let resolvers = try ResolverListService.resolve(settings: options.settings)
+        let resolvers: String
+        if let suppliedResolvers = options.resolversText {
+            resolvers = suppliedResolvers
+        } else {
+            resolvers = try ResolverListService.resolve(profile: options.profile, settings: options.settings)
+        }
 
         let fm = FileManager.default
         try fm.createDirectory(at: options.runtimeDirectory, withIntermediateDirectories: true)
@@ -105,7 +116,18 @@ public final class MasterDnsEngine {
                 ?? AppLocalization.string("Failed to start MasterDnsVPN client.")
             throw MasterDnsEngineError.startFailed(message)
         }
-        lock.lock(); currentSocksPort = options.settings.socksPort; lock.unlock()
+
+        var readyError: NSError?
+        let didBecomeReady = MobileWaitUntilReady(options.readinessTimeoutSeconds, &readyError)
+        if !didBecomeReady {
+            MobileStop()
+            MobileSetLogWriter(nil)
+            lock.lock(); logRelay = nil; lock.unlock()
+            let message = readyError?.localizedDescription
+                ?? AppLocalization.string("MasterDnsVPN did not become ready before the timeout.")
+            throw MasterDnsEngineError.startFailed(message)
+        }
+        lock.lock(); currentSocksPort = options.profile.configuration.listener.listenPort; lock.unlock()
         #else
         _ = configTOML
         _ = resolvers
@@ -127,7 +149,7 @@ public final class MasterDnsEngine {
         lock.unlock()
     }
 
-    private func validate(_ profile: ConnectionProfile, settings: AppSettings) throws {
+    private func validate(_ profile: ConnectionProfile) throws {
         let trimmedDomain = profile.domain.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedDomain.isEmpty else {
             throw MasterDnsEngineError.invalidProfile(AppLocalization.string("Domain is required."))
@@ -138,8 +160,17 @@ public final class MasterDnsEngine {
         guard !profile.encryptionKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw MasterDnsEngineError.invalidProfile(AppLocalization.string("Encryption key is required."))
         }
-        guard AppSettings.socksPortRange.contains(settings.socksPort) else {
+        guard (1_024...65_535).contains(profile.configuration.listener.listenPort) else {
             throw MasterDnsEngineError.invalidProfile(AppLocalization.string("SOCKS port must be between 1024 and 65535."))
+        }
+        let listener = profile.configuration.listener
+        if listener.httpProxyEnabled {
+            guard (1_024...65_535).contains(listener.httpProxyPort) else {
+                throw MasterDnsEngineError.invalidProfile("HTTP proxy port must be between 1024 and 65535.")
+            }
+            guard listener.httpProxyPort != listener.listenPort else {
+                throw MasterDnsEngineError.invalidProfile("SOCKS and HTTP proxy ports must be different.")
+            }
         }
     }
 }

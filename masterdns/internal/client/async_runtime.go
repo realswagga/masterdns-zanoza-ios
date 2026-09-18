@@ -62,6 +62,7 @@ func (c *Client) runtimePacketDuplicationCount(packetType uint8) int {
 // StopAsyncRuntime stops all running workers (Readers, Writers, Processors).
 // It ensures the UDP socket is closed and all goroutines exit.
 func (c *Client) StopAsyncRuntime() {
+	c.runtimeReady.Store(false)
 	if c.asyncCancel != nil {
 		c.log.Debugf("\U0001F6D1 <yellow>Stopping Async Runtime...</yellow>")
 		c.asyncCancel()
@@ -76,6 +77,9 @@ func (c *Client) StopAsyncRuntime() {
 
 	if c.tcpListener != nil {
 		c.tcpListener.Stop()
+	}
+	if c.httpListener != nil {
+		c.httpListener.Stop()
 	}
 
 	if c.dnsListener != nil {
@@ -302,6 +306,10 @@ func (c *Client) StartAsyncRuntime(parentCtx context.Context) error {
 			c.tcpListener.Stop()
 			c.tcpListener = nil
 		}
+		if c.httpListener != nil {
+			c.httpListener.Stop()
+			c.httpListener = nil
+		}
 		if c.dnsListener != nil {
 			c.dnsListener.Stop()
 			c.dnsListener = nil
@@ -336,6 +344,14 @@ func (c *Client) StartAsyncRuntime(parentCtx context.Context) error {
 	if err := c.tcpListener.Start(runtimeCtx, c.cfg.ListenIP, c.cfg.ListenPort); err != nil {
 		c.log.Errorf("<red>❌ Failed to start %s proxy: %v</red>", c.cfg.ProtocolType, err)
 		return err
+	}
+
+	if c.cfg.HTTPProxyEnabled {
+		c.httpListener = NewTCPListener(c, "HTTP")
+		if err := c.httpListener.Start(runtimeCtx, c.cfg.ListenIP, c.cfg.HTTPProxyPort); err != nil {
+			c.log.Errorf("<red>❌ Failed to start HTTP proxy: %v</red>", err)
+			return err
+		}
 	}
 
 	// Start DNS Listener if enabled
