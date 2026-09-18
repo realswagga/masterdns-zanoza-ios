@@ -379,7 +379,9 @@ struct IntegerSettingRow: View {
                 #if os(iOS)
                 .keyboardType(.numberPad)
                 #endif
-                .onChange(of: value) { value = min(max(value, range.lowerBound), range.upperBound) }
+                .onChange(of: value) { newValue in
+                    value = min(max(newValue, range.lowerBound), range.upperBound)
+                }
         }
     }
 }

@@ -110,7 +110,17 @@ final class ConfigurationImportTests: XCTestCase {
 
     func testV2ShareIncludesResolverPresetAndRegeneratesIDs() throws {
         let endpoint = try XCTUnwrap(ResolverEndpoint(host: "77.88.8.8"))
-        let preset = ResolverPreset(name: "RU", endpoints: [endpoint])
+        let evaluation = ResolverEvaluation(
+            endpoint: endpoint,
+            status: .tunnelAccepted,
+            attempts: 3,
+            replies: 3,
+            medianLatencyMS: 42,
+            lossPercent: 0,
+            uploadMTU: 133,
+            downloadMTU: 2_048
+        )
+        let preset = ResolverPreset(name: "RU", endpoints: [endpoint], evaluations: [evaluation])
         var profile = ConnectionProfile(name: "Shared", domain: "x.false.actor", encryptionKey: "secret")
         profile.resolverPresetID = preset.id
 
@@ -120,6 +130,7 @@ final class ConfigurationImportTests: XCTestCase {
         XCTAssertNotEqual(importedPreset.id, preset.id)
         XCTAssertEqual(decoded.profile.resolverPresetID, importedPreset.id)
         XCTAssertEqual(importedPreset.endpoints, preset.endpoints)
+        XCTAssertTrue(importedPreset.evaluations.isEmpty, "Device/path-specific scan telemetry must not be shared")
         XCTAssertEqual(importedPreset.kind, .parent)
     }
 }

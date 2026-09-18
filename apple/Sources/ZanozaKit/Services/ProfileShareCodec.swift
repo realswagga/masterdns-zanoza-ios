@@ -145,7 +145,14 @@ private struct SharedProfilePayloadV2: Codable {
     init(profile: ConnectionProfile, resolverPreset: ResolverPreset?) {
         version = 2
         self.profile = profile
-        self.resolverPreset = resolverPreset
+        if var portablePreset = resolverPreset {
+            // Scan telemetry can dwarf the resolver list and is device/path
+            // specific. Share only the reusable endpoints and hierarchy label.
+            portablePreset.evaluations = []
+            self.resolverPreset = portablePreset
+        } else {
+            self.resolverPreset = nil
+        }
     }
 
     func importedBundle() -> ImportedProfileBundle {

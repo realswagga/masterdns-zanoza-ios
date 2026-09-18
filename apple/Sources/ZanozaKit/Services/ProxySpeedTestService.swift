@@ -45,7 +45,7 @@ public struct ProxySpeedTestResult: Equatable {
     public var completedAt: Date
 }
 
-public enum ProxySpeedTestStage: String, Equatable {
+public enum ProxySpeedTestStage: String, Equatable, Sendable {
     case proxyHandshake
     case egressVerification
     case download
