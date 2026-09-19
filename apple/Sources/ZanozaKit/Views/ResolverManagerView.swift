@@ -803,7 +803,7 @@ private struct ResolverStatisticsView: View {
                 if ranked.isEmpty {
                     Text("No measurements yet.").foregroundStyle(.secondary)
                 }
-                ForEach(Array(ranked.prefix(20).enumerated()), id: \.element.id) { index, result in
+                ForEach(Array(ranked.prefix(20).enumerated()), id: \.offset) { index, result in
                     HStack(alignment: .top) {
                         Text("#\(index + 1)")
                             .font(.caption.monospacedDigit())
