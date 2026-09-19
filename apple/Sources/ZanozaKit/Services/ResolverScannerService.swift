@@ -150,7 +150,10 @@ public final class ResolverScannerService: @unchecked Sendable {
             preset.endpoints,
             domain: profile.domain,
             domains: options.reconciliationDomains,
-            recordTypes: options.reconciliationRecordTypes,
+            // Keep ordinary profile evaluation at one delegated A query per
+            // attempt; the broader A/AAAA matrix is enabled only for the
+            // autonomous carrier reconciliation path.
+            recordTypes: options.reconciliationDomains.isEmpty ? [1] : options.reconciliationRecordTypes,
             options: options,
             progress: progress
         )

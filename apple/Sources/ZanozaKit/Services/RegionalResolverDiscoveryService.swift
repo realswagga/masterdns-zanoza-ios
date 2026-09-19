@@ -3,6 +3,9 @@ import Foundation
 #if canImport(Darwin)
 import Darwin
 #endif
+#if canImport(SystemConfiguration)
+import SystemConfiguration
+#endif
 
 /// Shared bounded domain set for automatic carrier resolver reconciliation.
 /// It deliberately mixes Russian/carrier names with neutral global controls.
@@ -128,7 +131,7 @@ public enum RegionalResolverDiscoveryService {
         }
         if parsed.endpoints.isEmpty && options.seedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             if options.carrierSeedEndpoints.isEmpty {
-                issues.append("No carrier DHCP resolver was exposed; enter DHCP/router DNS addresses or select a provider list.")
+                issues.append("No seed/carrier DHCP resolver was exposed; enter DHCP/router DNS addresses or select a provider list.")
             }
         }
 
@@ -226,9 +229,17 @@ public enum CarrierResolverSeedService {
         // does not introduce an external Quad9/Cloudflare dependency.
         // The dynamic lookup keeps this package buildable on SDKs where Apple's
         // resolver header is not exposed to Swift.
+        #if canImport(SystemConfiguration)
+        // SystemConfiguration is the authoritative public Apple API for the
+        // active DHCP/service DNS list. It is checked before a query-response
+        // inference so a local forwarding stub cannot hide the carrier pair.
+        for value in systemConfigurationServers() {
+            add(value, source: "dhcp:SystemConfiguration")
+        }
+        #endif
         #if canImport(Darwin)
         let queried = querySystemResponders(names)
-        for value in queried { add(value, source: "carrier DHCP") }
+        for value in queried { add(value, source: "carrier responder") }
         if queried.isEmpty && !names.isEmpty {
             issues.append("System DNS responder API returned no carrier address; trying resolver configuration files.")
         }
@@ -262,6 +273,49 @@ public enum CarrierResolverSeedService {
         }
         return CarrierResolverSeedReport(endpoints: endpoints, issues: issues, queriedDomains: names)
     }
+
+    #if canImport(SystemConfiguration)
+    private static func systemConfigurationServers() -> [String] {
+        guard let store = SCDynamicStoreCreate(
+            nil,
+            "io.zanoza.carrier-resolver-scan" as CFString,
+            nil,
+            nil
+        ),
+        let value = SCDynamicStoreCopyValue(
+            store,
+            "State:/Network/Global/DNS" as CFString
+        ) else { return [] }
+
+        var output: [String] = []
+        var seen = Set<String>()
+
+        func collect(_ value: Any, key: String? = nil) {
+            if let addresses = value as? [String], key == "ServerAddresses" {
+                for address in addresses {
+                    guard IPv4Octets(address) != nil, seen.insert(address).inserted else { continue }
+                    output.append(address)
+                }
+                return
+            }
+            if let dictionary = value as? [String: Any] {
+                for (childKey, childValue) in dictionary {
+                    collect(childValue, key: childKey)
+                }
+                return
+            }
+            if let dictionary = value as? NSDictionary {
+                for key in dictionary.allKeys {
+                    guard let childKey = key as? String,
+                          let childValue = dictionary[childKey] else { continue }
+                    collect(childValue, key: childKey)
+                }
+            }
+        }
+        collect(value)
+        return output
+    }
+    #endif
 
     #if canImport(Darwin)
     private typealias DNSOpen = @convention(c) (UnsafePointer<CChar>?) -> OpaquePointer?
