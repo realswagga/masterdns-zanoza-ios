@@ -130,13 +130,61 @@ final class ResolverRankingTests: XCTestCase {
 final class LogFormatterTests: XCTestCase {
     func testCompactLogRemovesColourTagsAndTablePadding() {
         let lines = [
-            "[01:02:03] <green>✅ Accepted (1/2): resolver | upload=100 | download=500</green>",
+            "[01:02:03] 2026/09/18 01:02:03 [MasterDnsVPN Client] [INFO] <green>✅ Accepted (1/2): x.false.actor via 10.140.1.254:53 | upload=100 | download=500 | totals: valid=1, rejected=0</green>",
             "--------------------------------------------------------------------------------"
         ]
         let compact = LogFormatter.compact(lines)
-        XCTAssertTrue(compact[0].contains("Accepted (1/2)"))
+        XCTAssertEqual(compact[0], "[I] ✅ (1/2) : x.false.actor - 10.140.1.254 | U=100 | D=500 | v:1, r:0")
         XCTAssertFalse(compact[0].contains("<green>"))
         XCTAssertEqual(compact[1], "────────")
+    }
+
+    func testCompactRejectedAndMtuSummaryUseShortTokens() {
+        let lines = [
+            "[MasterDnsVPN Client] [WARN] ❌ Rejected (2/5): x.false.actor via 10.140.1.2:53 | reason=UPLOAD_MTU | value=0 | totals: valid=1, rejected=1",
+            "[MasterDnsVPN Client] [INFO] Total valid resolvers after MTU testing: 3 of 5",
+            "[MasterDnsVPN Client] [INFO] Global MTU Configuration -> Upload: 111, Download: 1149",
+            "[22:40:13] 2026/09/17 19:40:13 [MasterDnsVPN Client] [INFO] 10.140.1.254:53    111    1149    114ms    x.false.actor",
+        ]
+        let compact = LogFormatter.compact(lines)
+        XCTAssertEqual(compact[0], "[W] ❌ (2/5) : x.false.actor - 10.140.1.2 | UPLOAD_MTU | v:1, r:1")
+        XCTAssertEqual(compact[1], "[I] MTU 3/5 valid")
+        XCTAssertEqual(compact[2], "[I] MTU U=111 D=1149")
+        XCTAssertEqual(compact[3], "[I] 10.140.1.254 U=111 D=1149 114ms")
+    }
+}
+
+final class RegionalResolverDiscoveryTests: XCTestCase {
+    func testDiscoveryExpandsOnlyBoundedPrivateNeighbourhood() throws {
+        let report = RegionalResolverDiscoveryService.discover(
+            options: RegionalResolverDiscoveryOptions(
+                seedText: "10.140.1.254\n10.140.1.254:53\n194.226.80.1",
+                localIPv4: "10.140.1.100",
+                expandNearby: true,
+                nearbyRadius: 2,
+                maximumCandidates: 64
+            )
+        )
+        XCTAssertTrue(report.candidates.contains { $0.endpoint.host == "10.140.1.254" })
+        XCTAssertTrue(report.candidates.contains { $0.endpoint.host == "10.140.1.252" })
+        XCTAssertTrue(report.candidates.contains { $0.endpoint.host == "10.140.1.100" })
+        XCTAssertFalse(report.candidates.contains { $0.endpoint.host == "194.226.80.1" })
+        XCTAssertTrue(report.issues.contains { $0.contains("prohibited") })
+        XCTAssertLessThanOrEqual(report.candidates.count, 64)
+    }
+
+    func testPublicLocalAddressDoesNotTriggerImplicitSweep() {
+        let report = RegionalResolverDiscoveryService.discover(
+            options: RegionalResolverDiscoveryOptions(
+                seedText: "",
+                localIPv4: "62.60.236.225",
+                expandNearby: true,
+                nearbyRadius: 16,
+                maximumCandidates: 512
+            )
+        )
+        XCTAssertTrue(report.candidates.isEmpty)
+        XCTAssertTrue(report.issues.contains { $0.contains("No seed") })
     }
 }
 

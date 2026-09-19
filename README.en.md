@@ -94,6 +94,13 @@ The embedded proxy nevertheless accepts the user/password-only SOCKS greeting pr
 
 ## Resolver manager and tests
 
+- The **Scan ISP / regional DNS** action accepts DHCP/router output or a
+  provider list, optionally adds only a bounded private `/24` neighbourhood
+  around the supplied seeds/current interface, and keeps source provenance in
+  the generated parent preset. Discovery progress and a live compact log stay
+  visible. Open **Save pool and evaluate** for the existing reachability,
+  MasterDNS-MTU, and bounded throughput stages; use its explicit selection
+  action to create a child preset.
 - Import parent pools from the clipboard, plain text, CSV-like files, JSON, IPv4/IPv6 addresses, or bounded IPv4 CIDRs.
 - Create evaluated child presets and Top 5/10/20/50/100 lists by balanced, latency, reliability, or measured-throughput rank.
 - Direct DNS reachability is only a prefilter. The native stage sends real encrypted MasterDNS MTU probes using the profile domain/key.

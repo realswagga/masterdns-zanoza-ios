@@ -12,6 +12,7 @@ public struct ResolverManagerView: View {
     @State private var importDraft: ResolverImportDraft?
     @State private var isShowingFileImporter = false
     @State private var scanPreset: ResolverPreset?
+    @State private var isShowingRegionalScan = false
     @State private var message: String?
 
     public init(
@@ -55,6 +56,11 @@ public struct ResolverManagerView: View {
         }
         .navigationTitle("Resolver presets")
         .toolbar {
+            ToolbarItem(placement: .secondaryAction) {
+                Button { isShowingRegionalScan = true } label: {
+                    Label("Scan ISP / regional DNS", systemImage: "antenna.radiowaves.left.and.right")
+                }
+            }
             ToolbarItem(placement: .primaryAction) {
                 Menu {
                     Button { importFromClipboard() } label: {
@@ -65,6 +71,10 @@ public struct ResolverManagerView: View {
                     }
                     Button { importDraft = ResolverImportDraft() } label: {
                         Label("Enter plain text", systemImage: "square.and.pencil")
+                    }
+                    Divider()
+                    Button { isShowingRegionalScan = true } label: {
+                        Label("Scan ISP / regional DNS", systemImage: "antenna.radiowaves.left.and.right")
                     }
                 } label: {
                     Label("Add resolver preset", systemImage: "plus")
@@ -108,6 +118,17 @@ public struct ResolverManagerView: View {
                     settings: settings,
                     isTunnelRunning: isTunnelRunning,
                     physicalInterface: physicalInterface
+                )
+            }
+        }
+        .sheet(isPresented: $isShowingRegionalScan) {
+            NavigationStack {
+                RegionalResolverScanView(
+                    store: store,
+                    profile: profile,
+                    settings: settings,
+                    physicalInterface: physicalInterface,
+                    isTunnelRunning: isTunnelRunning
                 )
             }
         }
@@ -303,7 +324,7 @@ private struct ResolverImportEditor: View {
     }
 }
 
-private struct ResolverScanView: View {
+struct ResolverScanView: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var store: ResolverPresetStore
     @ObservedObject private var appLogger = AppLogger.shared
@@ -820,7 +841,7 @@ private struct ResolverStatisticsView: View {
                             .foregroundStyle(.secondary)
                             .frame(width: 28, alignment: .leading)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(result.endpoint.canonicalAddress).font(.callout.monospaced())
+                            Text(compactAddress(result.endpoint.canonicalAddress)).font(.callout.monospaced())
                             Text(statDetail(result)).font(.caption).foregroundStyle(.secondary)
                         }
                     }
@@ -835,16 +856,22 @@ private struct ResolverStatisticsView: View {
     }
 
     private func statDetail(_ result: ResolverEvaluation) -> String {
-        var parts = ["loss \(String(format: "%.0f", result.lossPercent))%"]
+        var parts = ["L=\(String(format: "%.0f", result.lossPercent))%"]
         if let latency = result.medianLatencyMS ?? result.tunnelLatencyMS {
-            parts.append("\(String(format: "%.0f", latency)) ms")
+            parts.append("\(String(format: "%.0f", latency))ms")
         }
         if let speed = result.downloadMbps {
-            parts.append("↓ \(String(format: "%.2f", speed)) Mbit/s")
+            parts.append("↓\(String(format: "%.2f", speed))")
         }
         if let speed = result.uploadMbps {
-            parts.append("↑ \(String(format: "%.2f", speed)) Mbit/s")
+            parts.append("↑\(String(format: "%.2f", speed))")
         }
+        if let upload = result.uploadMTU { parts.append("U=\(upload)") }
+        if let download = result.downloadMTU { parts.append("D=\(download)") }
         return parts.joined(separator: " · ")
+    }
+
+    private func compactAddress(_ address: String) -> String {
+        address.replacingOccurrences(of: ":53", with: "")
     }
 }
