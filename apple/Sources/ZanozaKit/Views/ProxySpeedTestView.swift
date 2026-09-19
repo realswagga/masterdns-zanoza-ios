@@ -6,13 +6,16 @@ public struct ProxySpeedTestView: View {
     let tunnelReady: Bool
 
     @State private var stage: ProxySpeedTestStage?
+    @State private var progress: ProxySpeedTestProgress?
+    @State private var testLogs: [String] = []
+    @State private var isShowingLogs = false
     @State private var result: ProxySpeedTestResult?
     @State private var errorMessage: String?
     @State private var task: Task<Void, Never>?
     @State private var egressURL = "http://checkip.amazonaws.com/"
     @State private var downloadURL = "http://speedtest.tele2.net/1MB.zip"
     @State private var uploadURL = "http://httpbin.org/post"
-    @State private var uploadKilobytes = 128
+    @State private var uploadKilobytes = 32
 
     private let tester = ProxySpeedTestService()
 
@@ -35,8 +38,24 @@ public struct ProxySpeedTestView: View {
 
             if let stage {
                 Section("Progress") {
-                    ProgressView()
-                    Text(stageTitle(stage)).foregroundStyle(.secondary)
+                    if progress?.totalBytes != nil {
+                        ProgressView(value: progress?.fraction ?? 0, total: 1) {
+                            Text(stageTitle(stage))
+                        } currentValueLabel: {
+                            Text(progress?.detail ?? "Starting…")
+                        }
+                    } else {
+                        ProgressView {
+                            Text(stageTitle(stage))
+                        } currentValueLabel: {
+                            Text(progress?.detail ?? "Starting…")
+                        }
+                    }
+                    if let progress, let total = progress.totalBytes {
+                        Text("\(ByteCountFormatter.string(fromByteCount: Int64(progress.completedBytes), countStyle: .file)) / \(ByteCountFormatter.string(fromByteCount: Int64(total), countStyle: .file))")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
 
@@ -71,12 +90,32 @@ public struct ProxySpeedTestView: View {
         }
         .navigationTitle("Tunnel speed test")
         .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button { isShowingLogs = true } label: {
+                    Label("Log", systemImage: "text.alignleft")
+                }
+            }
             ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
+        }
+        .sheet(isPresented: $isShowingLogs) {
+            NavigationStack {
+                LogView(logs: testLogs, onClear: { testLogs.removeAll() })
+                    .navigationTitle("Speed-test log")
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") { isShowingLogs = false }
+                        }
+                    }
+            }
         }
         .alert("Speed test failed", isPresented: Binding(
             get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } }
         )) { Button("OK", role: .cancel) {} } message: { Text(errorMessage ?? "") }
-        .onDisappear(perform: cancel)
+        .onAppear { acquireIdleTimer() }
+        .onDisappear {
+            cancel()
+            releaseIdleTimer()
+        }
     }
 
     private var proxyDisplay: String {
@@ -108,16 +147,35 @@ public struct ProxySpeedTestView: View {
         )
         result = nil
         errorMessage = nil
+        progress = nil
+        testLogs = ["Proxy test started · \(proxyDisplay)"]
         task = Task {
             do {
-                let value = try await tester.run(options: options) { next in
-                    Task { @MainActor in stage = next }
+                let value = try await tester.runDetailed(options: options) { next in
+                    Task { @MainActor in
+                        stage = next.stage
+                        progress = next
+                        let line = "\(stageTitle(next.stage)) · \(next.detail)"
+                        if testLogs.last != line { testLogs.append(line) }
+                    }
                 }
                 guard !Task.isCancelled else { return }
-                await MainActor.run { result = value; stage = nil; task = nil }
+                await MainActor.run {
+                    result = value
+                    testLogs.append("Complete · egress \(value.egressIP) · ↓ \(formatMbps(value.downloadMbps)) · ↑ \(formatMbps(value.uploadMbps))")
+                    stage = nil
+                    progress = nil
+                    task = nil
+                }
             } catch {
                 guard !Task.isCancelled else { return }
-                await MainActor.run { errorMessage = error.localizedDescription; stage = nil; task = nil }
+                await MainActor.run {
+                    errorMessage = error.localizedDescription
+                    testLogs.append("Failed · \(error.localizedDescription)")
+                    stage = nil
+                    progress = nil
+                    task = nil
+                }
             }
         }
     }
@@ -127,6 +185,7 @@ public struct ProxySpeedTestView: View {
         tester.cancel()
         task = nil
         stage = nil
+        progress = nil
     }
 
     private func stageTitle(_ value: ProxySpeedTestStage) -> String {
@@ -140,4 +199,16 @@ public struct ProxySpeedTestView: View {
 
     private func formatMS(_ value: Double) -> String { String(format: "%.0f ms", value) }
     private func formatMbps(_ value: Double) -> String { String(format: "%.2f Mbit/s", value) }
+
+    private func acquireIdleTimer() {
+        #if os(iOS)
+        IdleTimerController.shared.acquire()
+        #endif
+    }
+
+    private func releaseIdleTimer() {
+        #if os(iOS)
+        IdleTimerController.shared.release()
+        #endif
+    }
 }

@@ -94,6 +94,7 @@ final class ConnectionProfileTests: XCTestCase {
         XCTAssertEqual(profile.downloadCompression, .off)
         XCTAssertEqual(profile.configuration.mtu.maxUpload, 133)
         XCTAssertEqual(profile.configuration.mtu.maxDownload, 2_048)
+        XCTAssertEqual(profile.configuration.logLevel, .info)
     }
 
     func testProvidedFullConfigurationIsNotOverwrittenByInitializerDefaults() {

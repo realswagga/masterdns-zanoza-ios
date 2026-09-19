@@ -20,8 +20,8 @@ public struct ProxySpeedTestOptions: Equatable {
         egressURL: URL = URL(string: "http://checkip.amazonaws.com/")!,
         downloadURL: URL = URL(string: "http://speedtest.tele2.net/1MB.zip")!,
         uploadURL: URL = URL(string: "http://httpbin.org/post")!,
-        uploadBytes: Int = 128 * 1_024,
-        timeoutSeconds: Double = 90
+        uploadBytes: Int = 32 * 1_024,
+        timeoutSeconds: Double = 30
     ) {
         self.proxyHost = proxyHost
         self.proxyPort = proxyPort
@@ -50,6 +50,29 @@ public enum ProxySpeedTestStage: String, Equatable, Sendable {
     case egressVerification
     case download
     case upload
+}
+
+public struct ProxySpeedTestProgress: Equatable, Sendable {
+    public let stage: ProxySpeedTestStage
+    /// Bytes received/sent for the active transfer when known.
+    public let completedBytes: Int
+    public let totalBytes: Int?
+    public let fraction: Double
+    public let detail: String
+
+    public init(
+        stage: ProxySpeedTestStage,
+        completedBytes: Int = 0,
+        totalBytes: Int? = nil,
+        fraction: Double = 0,
+        detail: String = ""
+    ) {
+        self.stage = stage
+        self.completedBytes = max(0, completedBytes)
+        self.totalBytes = totalBytes
+        self.fraction = min(max(fraction, 0), 1)
+        self.detail = detail
+    }
 }
 
 public enum ProxySpeedTestError: LocalizedError {
@@ -93,47 +116,59 @@ public final class ProxySpeedTestService: @unchecked Sendable {
         options: ProxySpeedTestOptions,
         progress: @escaping @Sendable (ProxySpeedTestStage) -> Void = { _ in }
     ) async throws -> ProxySpeedTestResult {
+        try await runDetailed(options: options) { update in
+            progress(update.stage)
+        }
+    }
+
+    public func runDetailed(
+        options: ProxySpeedTestOptions,
+        progress: @escaping @Sendable (ProxySpeedTestProgress) -> Void = { _ in }
+    ) async throws -> ProxySpeedTestResult {
         try await withTaskCancellationHandler(operation: {
             guard (1...65_535).contains(options.proxyPort), !options.proxyHost.isEmpty else {
                 throw ProxySpeedTestError.invalidProxy
             }
             try Task.checkCancellation()
 
-            progress(.proxyHandshake)
+            progress(ProxySpeedTestProgress(stage: .proxyHandshake, detail: "Opening local SOCKS connection"))
             let egress = try await request(
                 url: options.egressURL,
                 method: "GET",
                 body: Data(),
                 options: options,
-                stage: .egressVerification
+                stage: .egressVerification,
+                progress: progress
             )
             try Task.checkCancellation()
-            progress(.egressVerification)
+            progress(ProxySpeedTestProgress(stage: .egressVerification, fraction: 1, detail: "Remote egress verified"))
             let egressText = String(data: egress.body, encoding: .utf8)?
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             guard ResolverEndpoint.isIPAddress(egressText) else {
                 throw ProxySpeedTestError.egressVerificationFailed
             }
 
-            progress(.download)
+            progress(ProxySpeedTestProgress(stage: .download, detail: "Downloading through proxy"))
             let download = try await request(
                 url: options.downloadURL,
                 method: "GET",
                 body: Data(),
                 options: options,
-                stage: .download
+                stage: .download,
+                progress: progress
             )
             let downloadMbps = Self.megabitsPerSecond(bytes: download.body.count, seconds: download.elapsedSeconds)
 
             try Task.checkCancellation()
-            progress(.upload)
+            progress(ProxySpeedTestProgress(stage: .upload, detail: "Uploading incompressible payload"))
             let uploadBody = Self.makeIncompressiblePayload(byteCount: options.uploadBytes)
             let upload = try await request(
                 url: options.uploadURL,
                 method: "POST",
                 body: uploadBody,
                 options: options,
-                stage: .upload
+                stage: .upload,
+                progress: progress
             )
             let uploadMbps = Self.megabitsPerSecond(bytes: uploadBody.count, seconds: upload.elapsedSeconds)
 
@@ -172,7 +207,8 @@ public final class ProxySpeedTestService: @unchecked Sendable {
         method: String,
         body: Data,
         options: ProxySpeedTestOptions,
-        stage: ProxySpeedTestStage
+        stage: ProxySpeedTestStage,
+        progress: @escaping @Sendable (ProxySpeedTestProgress) -> Void
     ) async throws -> HTTPResult {
         guard url.scheme?.lowercased() == "http", let host = url.host else {
             throw ProxySpeedTestError.unsupportedURL(url)
@@ -207,10 +243,33 @@ public final class ProxySpeedTestService: @unchecked Sendable {
 
             let transferStart = DispatchTime.now().uptimeNanoseconds
             try await socket.send(request, timeout: options.timeoutSeconds, stage: stage)
+            if !body.isEmpty {
+                progress(ProxySpeedTestProgress(
+                    stage: stage,
+                    completedBytes: body.count,
+                    totalBytes: body.count,
+                    fraction: 1,
+                    detail: "upload payload sent; waiting for remote response"
+                ))
+            }
             let response = try await socket.receiveUntilClose(
                 maximumBytes: max(8 * 1_024 * 1_024, body.count + 1_024 * 1_024),
                 timeout: options.timeoutSeconds,
-                stage: stage
+                stage: stage,
+                progress: { bytes in
+                    let total = method == "POST" ? nil : expectedContentLength(from: url)
+                    let fraction = total.map { min(1, Double(bytes) / Double(max(1, $0))) } ?? 0
+                    progress(ProxySpeedTestProgress(
+                        stage: stage,
+                        completedBytes: bytes,
+                        totalBytes: total,
+                        fraction: fraction,
+                        detail: stage.rawValue + ": " + ByteCountFormatter.string(
+                            fromByteCount: Int64(bytes),
+                            countStyle: .file
+                        )
+                    ))
+                }
             )
             let elapsed = max(0.001, Double(DispatchTime.now().uptimeNanoseconds - transferStart) / 1_000_000_000)
             socket.cancel()
@@ -220,6 +279,14 @@ public final class ProxySpeedTestService: @unchecked Sendable {
             socket.cancel()
             throw error
         }
+    }
+
+    // The standard speed-test URL has a stable 1 MiB object, but the response
+    // header is not available until after the stream starts. This hint keeps
+    // progress useful without making correctness depend on a content length.
+    private func expectedContentLength(from url: URL) -> Int? {
+        if url.path.lowercased().contains("1mb") { return 1 * 1_024 * 1_024 }
+        return nil
     }
 
     private func performSocksHandshake(
@@ -436,7 +503,12 @@ private final class AsyncTCPConnection: @unchecked Sendable {
         }
     }
 
-    func receiveUntilClose(maximumBytes: Int, timeout: Double, stage: ProxySpeedTestStage) async throws -> Data {
+    func receiveUntilClose(
+        maximumBytes: Int,
+        timeout: Double,
+        stage: ProxySpeedTestStage,
+        progress: @escaping @Sendable (Int) -> Void = { _ in }
+    ) async throws -> Data {
         try await withCheckedThrowingContinuation { continuation in
             let gate = ThrowingContinuationGate<Data>(continuation)
             var buffer = Data()
@@ -446,6 +518,7 @@ private final class AsyncTCPConnection: @unchecked Sendable {
             func next() {
                 connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1_024) { data, _, complete, error in
                     if let data { buffer.append(data) }
+                    progress(buffer.count)
                     if buffer.count > maximumBytes {
                         gate.fail(ProxySpeedTestError.connection("response exceeded safety limit"), cancel: self.connection)
                     } else if let error {

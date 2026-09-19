@@ -98,6 +98,46 @@ final class ResolverRankingTests: XCTestCase {
         XCTAssertEqual(reloaded.preset(id: parent.id)?.endpoints, [endpoint])
         XCTAssertEqual(reloaded.children(of: parent.id).map(\.id), [child.id])
     }
+
+    func testPresetStoreEditKeepsIdentityAndDropsRemovedMeasurements() throws {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: file) }
+        let endpointA = try XCTUnwrap(ResolverEndpoint(host: "77.88.8.8"))
+        let endpointB = try XCTUnwrap(ResolverEndpoint(host: "77.88.8.1"))
+        let evaluation = ResolverEvaluation(
+            endpoint: endpointA,
+            status: .tunnelAccepted,
+            attempts: 1,
+            replies: 1,
+            lossPercent: 0,
+            uploadMTU: 120,
+            downloadMTU: 2_048
+        )
+        let store = ResolverPresetStore(fileURL: file)
+        let parent = store.createParent(name: "Original", endpoints: [endpointA, endpointB], source: "scan")
+        var withEvaluation = parent
+        withEvaluation.evaluations = [evaluation]
+        store.save(withEvaluation)
+
+        let edited = try XCTUnwrap(store.update(parent.id, name: "Edited", endpoints: [endpointA]))
+        XCTAssertEqual(edited.id, parent.id)
+        XCTAssertEqual(edited.name, "Edited")
+        XCTAssertEqual(edited.endpoints, [endpointA])
+        XCTAssertEqual(edited.evaluations.map(\.endpoint), [endpointA])
+    }
+}
+
+final class LogFormatterTests: XCTestCase {
+    func testCompactLogRemovesColourTagsAndTablePadding() {
+        let lines = [
+            "[01:02:03] <green>✅ Accepted (1/2): resolver | upload=100 | download=500</green>",
+            "--------------------------------------------------------------------------------"
+        ]
+        let compact = LogFormatter.compact(lines)
+        XCTAssertTrue(compact[0].contains("Accepted (1/2)"))
+        XCTAssertFalse(compact[0].contains("<green>"))
+        XCTAssertEqual(compact[1], "────────")
+    }
 }
 
 final class ProxySpeedTestParsingTests: XCTestCase {

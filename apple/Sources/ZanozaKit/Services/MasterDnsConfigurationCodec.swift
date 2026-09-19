@@ -128,7 +128,7 @@ public enum MasterDnsConfigurationCodec {
         use("MTU_REMOVED_SERVER_LOG_FORMAT") { config.diagnostics.mtuRemovedLogFormat = string($0) }
         use("MTU_ADDED_SERVER_LOG_FORMAT") { config.diagnostics.mtuAddedLogFormat = string($0) }
         use("MTU_REACTIVE_ADDED_SERVER_LOG_FORMAT") { config.diagnostics.mtuReactiveAddedLogFormat = string($0) }
-        use("LOG_LEVEL") { config.logLevel = LogLevel(rawValue: string($0).uppercased()) ?? .warn }
+        use("LOG_LEVEL") { config.logLevel = LogLevel(rawValue: string($0).uppercased()) ?? .info }
 
         for (name, value) in values where !consumed.contains(name) {
             config.preservedUnsupportedSettings[name] = value

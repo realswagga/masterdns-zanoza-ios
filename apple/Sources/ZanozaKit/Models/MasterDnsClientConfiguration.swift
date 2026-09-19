@@ -401,7 +401,10 @@ public struct MasterDnsClientConfiguration: Codable, Equatable {
         ping: Ping = Ping(),
         arq: ARQ = ARQ(),
         diagnostics: Diagnostics = Diagnostics(),
-        logLevel: LogLevel = .warn,
+        // INFO is the useful default for a DNS tunnel: MTU acceptance,
+        // resolver counters, and session transitions are otherwise invisible
+        // while diagnosing a mobile connection.
+        logLevel: LogLevel = .info,
         preservedUnsupportedSettings: [String: String] = [:]
     ) {
         self.listener = listener
@@ -467,7 +470,7 @@ public struct MasterDnsClientConfiguration: Codable, Equatable {
                     testParallelism: 32
                 ),
                 runtime: Runtime(rxTxWorkers: 8, tunnelProcessWorkers: 8),
-                logLevel: .warn
+                logLevel: .info
             )
         }
     }

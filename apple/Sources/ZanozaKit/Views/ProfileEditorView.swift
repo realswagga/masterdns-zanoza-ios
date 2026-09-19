@@ -374,10 +374,12 @@ struct IntegerSettingRow: View {
         HStack {
             Text(title)
             Spacer()
-            TextField("", value: $value, format: .number)
+                TextField("", value: $value, format: .number)
                 .multilineTextAlignment(.trailing).frame(width: 96)
                 #if os(iOS)
-                .keyboardType(.numberPad)
+                // Keep the normal keyboard so users can paste values and move
+                // the caret naturally; the value is still clamped below.
+                .keyboardType(.default)
                 #endif
                 .onChange(of: value) { newValue in
                     value = min(max(newValue, range.lowerBound), range.upperBound)
@@ -399,10 +401,10 @@ struct DecimalSettingRow: View {
         HStack {
             Text(title)
             Spacer()
-            TextField("", value: $value, format: .number.precision(.fractionLength(0...3)))
+                TextField("", value: $value, format: .number.precision(.fractionLength(0...3)))
                 .multilineTextAlignment(.trailing).frame(width: 96)
                 #if os(iOS)
-                .keyboardType(.decimalPad)
+                .keyboardType(.default)
                 #endif
             if !suffix.isEmpty { Text(suffix).foregroundStyle(.secondary) }
         }

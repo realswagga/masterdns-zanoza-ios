@@ -30,6 +30,9 @@ public final class ClientViewModel: ObservableObject {
     private var stopTask: Task<Void, Never>?
     private var pingTasks: [UUID: Task<Void, Never>] = [:]
     private var lifecycleToken: UInt64 = 0
+    #if os(iOS)
+    private var idleTimerClaimed = false
+    #endif
 
     public init() {
         settings = AppSettingsStore.shared.load()
@@ -249,6 +252,7 @@ public final class ClientViewModel: ObservableObject {
         lifecycleToken &+= 1
         let token = lifecycleToken
         status = .starting
+        acquireIdleTimer()
         AppLogger.shared.append("Starting Zanoza tunnel for \(profile.domain)...")
 
         startTask?.cancel()
@@ -285,6 +289,7 @@ public final class ClientViewModel: ObservableObject {
                     }.value
                     #if os(iOS)
                     await MainActor.run { self.backgroundRuntimeKeeper.stop() }
+                    await MainActor.run { self.releaseIdleTimer() }
                     #endif
                     return
                 case .ignore:
@@ -308,6 +313,7 @@ public final class ClientViewModel: ObservableObject {
                     AppLogger.shared.append("Tunnel failed to start: \(error.localizedDescription)")
                     #if os(iOS)
                     self.backgroundRuntimeKeeper.stop()
+                    self.releaseIdleTimer()
                     #endif
                 }
             }
@@ -332,6 +338,7 @@ public final class ClientViewModel: ObservableObject {
                 guard self.lifecycleToken == token else { return }
                 #if os(iOS)
                 self.backgroundRuntimeKeeper.stop()
+                self.releaseIdleTimer()
                 #endif
                 self.status = .stopped
                 self.activeSocksPort = nil
@@ -363,12 +370,30 @@ public final class ClientViewModel: ObservableObject {
         physicalInterfaceMonitor.stop()
         #if os(iOS)
         backgroundRuntimeKeeper.stop()
+        releaseIdleTimer()
         #endif
     }
 
     private func persistProfiles() {
         profileStore.save(profiles)
     }
+
+    #if os(iOS)
+    private func acquireIdleTimer() {
+        guard !idleTimerClaimed else { return }
+        idleTimerClaimed = true
+        IdleTimerController.shared.acquire()
+    }
+
+    private func releaseIdleTimer() {
+        guard idleTimerClaimed else { return }
+        idleTimerClaimed = false
+        IdleTimerController.shared.release()
+    }
+    #else
+    private func acquireIdleTimer() {}
+    private func releaseIdleTimer() {}
+    #endif
 
     private func runtimeDirectory(for profile: ConnectionProfile) -> URL {
         let fm = FileManager.default

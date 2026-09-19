@@ -53,6 +53,35 @@ public final class ResolverPresetStore: ObservableObject {
         return value
     }
 
+    /// Updates an existing preset in place. Keeping the UUID and creation date
+    /// matters because profiles refer to resolver presets by UUID. Evaluation
+    /// measurements for addresses that were not edited are retained; changing
+    /// the resolver list clears stale measurements for removed/changed entries.
+    @discardableResult
+    public func update(
+        _ id: UUID,
+        name: String,
+        endpoints: [ResolverEndpoint],
+        source: String? = nil
+    ) -> ResolverPreset? {
+        guard let existing = preset(id: id) else { return nil }
+        let normalized = ResolverPreset(
+            id: existing.id,
+            name: name,
+            kind: existing.kind,
+            parentID: existing.parentID,
+            endpoints: endpoints,
+            evaluations: existing.evaluations,
+            sourceDescription: source ?? existing.sourceDescription,
+            createdAt: existing.createdAt,
+            updatedAt: existing.updatedAt
+        )
+        let allowed = Set(normalized.endpoints.map(\.id))
+        var value = normalized
+        value.evaluations = existing.evaluations.filter { allowed.contains($0.endpoint.id) }
+        return save(value)
+    }
+
     @discardableResult
     public func createParent(name: String, endpoints: [ResolverEndpoint], source: String = "") -> ResolverPreset {
         save(ResolverPreset(name: name, endpoints: endpoints, sourceDescription: source))

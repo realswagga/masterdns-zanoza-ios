@@ -32,9 +32,9 @@ public struct ResolverScanOptions: Equatable {
         runThroughputProbe: Bool = false,
         throughputCandidateLimit: Int = 5,
         throughputProxyPort: Int = 41_180,
-        throughputReadinessTimeoutSeconds: Double = 180,
-        throughputTestTimeoutSeconds: Double = 90,
-        throughputUploadBytes: Int = 128 * 1_024,
+        throughputReadinessTimeoutSeconds: Double = 30,
+        throughputTestTimeoutSeconds: Double = 15,
+        throughputUploadBytes: Int = 32 * 1_024,
         throughputEgressURL: URL = URL(string: "http://checkip.amazonaws.com/")!,
         throughputDownloadURL: URL = URL(string: "http://speedtest.tele2.net/1MB.zip")!,
         throughputUploadURL: URL = URL(string: "http://httpbin.org/post")!
@@ -48,8 +48,8 @@ public struct ResolverScanOptions: Equatable {
         self.runThroughputProbe = runThroughputProbe
         self.throughputCandidateLimit = min(max(throughputCandidateLimit, 1), 20)
         self.throughputProxyPort = min(max(throughputProxyPort, 1_024), 65_535)
-        self.throughputReadinessTimeoutSeconds = min(max(throughputReadinessTimeoutSeconds, 15), 600)
-        self.throughputTestTimeoutSeconds = min(max(throughputTestTimeoutSeconds, 10), 300)
+        self.throughputReadinessTimeoutSeconds = min(max(throughputReadinessTimeoutSeconds, 10), 180)
+        self.throughputTestTimeoutSeconds = min(max(throughputTestTimeoutSeconds, 5), 120)
         self.throughputUploadBytes = min(max(throughputUploadBytes, 16 * 1_024), 2 * 1_024 * 1_024)
         self.throughputEgressURL = throughputEgressURL
         self.throughputDownloadURL = throughputDownloadURL
@@ -70,6 +70,31 @@ public struct ResolverScanProgress: Equatable {
     public let total: Int
     public let accepted: Int
     public let detail: String
+    /// Fractional progress is used while one native probe or throughput
+    /// request is in flight. `completed` remains the count of finished items,
+    /// preserving the old API semantics for callers that do not need it.
+    public let fraction: Double
+    /// Partial measurements, emitted periodically so the evaluator can sort
+    /// and display rows while a large pool is still being tested.
+    public let snapshot: [ResolverEvaluation]
+
+    public init(
+        stage: Stage,
+        completed: Int,
+        total: Int,
+        accepted: Int,
+        detail: String,
+        fraction: Double = 1,
+        snapshot: [ResolverEvaluation] = []
+    ) {
+        self.stage = stage
+        self.completed = completed
+        self.total = total
+        self.accepted = accepted
+        self.detail = detail
+        self.fraction = min(max(fraction, 0), 1)
+        self.snapshot = snapshot
+    }
 }
 
 public enum ResolverScannerError: LocalizedError {
@@ -125,7 +150,8 @@ public final class ResolverScannerService: @unchecked Sendable {
                 completed: 0,
                 total: nativeCandidates.count,
                 accepted: 0,
-                detail: "Running encrypted MasterDNS MTU probes"
+                detail: "Running encrypted MasterDNS MTU probes",
+                fraction: 0
             ))
 
             if !nativeCandidates.isEmpty {
@@ -137,7 +163,9 @@ public final class ResolverScannerService: @unchecked Sendable {
                     timeoutSeconds: options.nativeScanTimeoutSeconds,
                     boundInterface: boundInterface,
                     boundIPv4: boundIPv4,
-                    boundIPv6: boundIPv6
+                    boundIPv6: boundIPv6,
+                    progress: progress,
+                    total: nativeCandidates.count
                 )
                 let nativeByEndpoint = Dictionary(uniqueKeysWithValues: native.results.map {
                     (ResolverEndpoint(host: $0.resolver, port: $0.port)?.id ?? "\($0.resolver):\($0.port)", $0)
@@ -152,6 +180,15 @@ public final class ResolverScannerService: @unchecked Sendable {
                     if !result.accepted { value.failureReason = result.status }
                     return value
                 }
+                progress(ResolverScanProgress(
+                    stage: .masterDnsMTU,
+                    completed: nativeCandidates.count,
+                    total: nativeCandidates.count,
+                    accepted: native.results.filter(\.accepted).count,
+                    detail: native.error ?? "MasterDNS MTU evaluation complete",
+                    fraction: 1,
+                    snapshot: merged
+                ))
                 completionDetail = native.error ?? "MasterDNS MTU evaluation complete"
             } else {
                 completionDetail = "No resolvers were eligible for an encrypted MTU probe"
@@ -182,7 +219,9 @@ public final class ResolverScannerService: @unchecked Sendable {
             completed: merged.count,
             total: merged.count,
             accepted: accepted,
-            detail: completionDetail
+            detail: completionDetail,
+            fraction: 1,
+            snapshot: merged
         ))
         return merged
     }
@@ -219,7 +258,8 @@ public final class ResolverScannerService: @unchecked Sendable {
                     completed: results.count,
                     total: endpoints.count,
                     accepted: accepted,
-                    detail: result.endpoint.canonicalAddress
+                    detail: result.endpoint.canonicalAddress,
+                    snapshot: results.count == endpoints.count || results.count.isMultiple(of: 5) ? results : []
                 ))
                 if nextIndex < endpoints.count {
                     let endpoint = endpoints[nextIndex]
@@ -338,7 +378,9 @@ public final class ResolverScannerService: @unchecked Sendable {
         timeoutSeconds: Double,
         boundInterface: String,
         boundIPv4: String,
-        boundIPv6: String
+        boundIPv6: String,
+        progress: @escaping ProgressHandler,
+        total: Int
     ) async throws -> NativeResolverScanPayload {
         #if canImport(Mobile)
         let config = ConfigBuilder.buildTOML(for: profile, settings: settings)
@@ -347,8 +389,19 @@ public final class ResolverScannerService: @unchecked Sendable {
             try await Task.detached(priority: .userInitiated) {
                 MobileSetBoundInterface(boundInterface)
                 MobileSetBoundAddress(boundIPv4, boundIPv6)
+                let progressState = ResolverNativeProgressState()
                 let relay = ResolverNativeLogRelay { line in
                     Task { @MainActor in AppLogger.shared.append(line) }
+                } progress: { completed, accepted, detail in
+                    guard progressState.accept(completed) else { return }
+                    progress(ResolverScanProgress(
+                        stage: .masterDnsMTU,
+                        completed: completed,
+                        total: total,
+                        accepted: accepted,
+                        detail: detail,
+                        fraction: total > 0 ? Double(completed) / Double(total) : 1
+                    ))
                 }
                 MobileSetLogWriter(relay)
                 defer { MobileSetLogWriter(nil) }
@@ -373,7 +426,7 @@ public final class ResolverScannerService: @unchecked Sendable {
             MobileCancelScan()
         })
         #else
-        _ = (endpoints, profile, settings, runtimeDirectory, timeoutSeconds, boundInterface, boundIPv4, boundIPv6)
+        _ = (endpoints, profile, settings, runtimeDirectory, timeoutSeconds, boundInterface, boundIPv4, boundIPv6, progress, total)
         throw ResolverScannerError.nativeScannerUnavailable
         #endif
     }
@@ -407,8 +460,12 @@ public final class ResolverScannerService: @unchecked Sendable {
                 completed: offset,
                 total: candidates.count,
                 accepted: output.filter { $0.downloadMbps != nil || $0.uploadMbps != nil }.count,
-                detail: "Testing \(candidate.endpoint.canonicalAddress) through its own MasterDNS session"
+                detail: "Testing \(candidate.endpoint.canonicalAddress) through its own MasterDNS session",
+                snapshot: output
             ))
+            let acceptedBefore = output.filter { $0.downloadMbps != nil || $0.uploadMbps != nil }.count
+            let candidateLabel = candidate.endpoint.canonicalAddress
+            let outputSnapshot = output
             do {
                 let measured = try await measureSingleResolver(
                     candidate.endpoint,
@@ -418,7 +475,19 @@ public final class ResolverScannerService: @unchecked Sendable {
                     runtimeDirectory: runtimeDirectory,
                     boundInterface: boundInterface,
                     boundIPv4: boundIPv4,
-                    boundIPv6: boundIPv6
+                    boundIPv6: boundIPv6,
+                    progress: { update in
+                        let fraction = max(0, min(0.99, update.fraction))
+                        progress(ResolverScanProgress(
+                            stage: .throughput,
+                            completed: offset,
+                            total: candidates.count,
+                            accepted: acceptedBefore,
+                            detail: candidateLabel + ": " + update.detail,
+                            fraction: fraction,
+                            snapshot: outputSnapshot
+                        ))
+                    }
                 )
                 if let index = output.firstIndex(where: { $0.endpoint.id == candidate.endpoint.id }) {
                     output[index].downloadMbps = measured.downloadMbps
@@ -443,7 +512,8 @@ public final class ResolverScannerService: @unchecked Sendable {
                 completed: offset + 1,
                 total: candidates.count,
                 accepted: output.filter { $0.downloadMbps != nil || $0.uploadMbps != nil }.count,
-                detail: candidate.endpoint.canonicalAddress
+                detail: candidate.endpoint.canonicalAddress,
+                snapshot: output
             ))
         }
         return output
@@ -457,7 +527,8 @@ public final class ResolverScannerService: @unchecked Sendable {
         runtimeDirectory: URL,
         boundInterface: String,
         boundIPv4: String,
-        boundIPv6: String
+        boundIPv6: String,
+        progress: @escaping @Sendable (ProxySpeedTestProgress) -> Void
     ) async throws -> ProxySpeedTestResult {
         var testProfile = profile
         testProfile.resolverPresetID = nil
@@ -508,7 +579,7 @@ public final class ResolverScannerService: @unchecked Sendable {
             }.value
             defer { engine.stop() }
             try Task.checkCancellation()
-            return try await speedTester.run(options: speedOptions)
+            return try await speedTester.runDetailed(options: speedOptions, progress: progress)
         }, onCancel: {
             speedTester.cancel()
             engine.stop()
@@ -554,12 +625,68 @@ private struct NativeResolverScanResult: Codable {
     let tunnelLatencyMS: Double
 }
 
+private final class ResolverNativeProgressState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var lastCompleted = 0
+
+    func accept(_ completed: Int) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard completed > lastCompleted else { return false }
+        lastCompleted = completed
+        return true
+    }
+}
+
 #if canImport(Mobile)
 private final class ResolverNativeLogRelay: NSObject, MobileLogWriterProtocol {
     private let callback: (String) -> Void
-    init(_ callback: @escaping (String) -> Void) { self.callback = callback }
+    private let progress: (Int, Int, String) -> Void
+
+    init(
+        _ callback: @escaping (String) -> Void,
+        progress: @escaping (Int, Int, String) -> Void
+    ) {
+        self.callback = callback
+        self.progress = progress
+    }
+
     func writeLog(_ line: String?) {
-        if let line, !line.isEmpty { callback(line) }
+        guard let line, !line.isEmpty else { return }
+        callback(line)
+        // Native MasterDNS emits stable counters in both accepted and
+        // rejected MTU lines: "(17/110) ... totals: valid=...". Parsing
+        // those counters gives the UI live progress without duplicating the
+        // probe implementation or waiting for the final JSON payload.
+        let normalized = Self.clean(line)
+        guard let open = normalized.firstIndex(of: "("),
+              let slash = normalized[normalized.index(after: open)...].firstIndex(of: "/"),
+              let close = normalized[slash...].firstIndex(of: ")") else { return }
+        let completedText = String(normalized[normalized.index(after: open)..<slash])
+        let completed = Int(completedText.trimmingCharacters(in: .whitespaces)) ?? 0
+        let totalsPart = normalized[normalized.index(after: close)...]
+        let accepted: Int
+        if let marker = totalsPart.range(of: "valid=") {
+            let value = totalsPart[marker.upperBound...].prefix { $0.isNumber }
+            accepted = Int(value) ?? 0
+        } else {
+            accepted = 0
+        }
+        guard completed > 0 else { return }
+        progress(completed, accepted, normalized)
+    }
+
+    private static func clean(_ line: String) -> String {
+        line
+            .replacingOccurrences(of: "\u{001B}\\[[0-9;]*m", with: "", options: .regularExpression)
+            .replacingOccurrences(of: "<red>", with: "")
+            .replacingOccurrences(of: "</red>", with: "")
+            .replacingOccurrences(of: "<green>", with: "")
+            .replacingOccurrences(of: "</green>", with: "")
+            .replacingOccurrences(of: "<yellow>", with: "")
+            .replacingOccurrences(of: "</yellow>", with: "")
+            .replacingOccurrences(of: "<cyan>", with: "")
+            .replacingOccurrences(of: "</cyan>", with: "")
     }
 }
 #endif

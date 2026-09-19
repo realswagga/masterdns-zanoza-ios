@@ -8,13 +8,15 @@ import AppKit
 public struct LogView: View {
     let logs: [String]
     let onClear: () -> Void
+    @State private var compact = false
 
     public init(logs: [String], onClear: @escaping () -> Void) {
         self.logs = logs
         self.onClear = onClear
     }
 
-    private var joined: String { logs.joined(separator: "\n") }
+    private var displayedLogs: [String] { compact ? LogFormatter.compact(logs) : logs }
+    private var joined: String { displayedLogs.joined(separator: "\n") }
 
     public var body: some View {
         VStack(spacing: 0) {
@@ -28,6 +30,12 @@ public struct LogView: View {
                 Spacer()
                 Button(action: copyLogs) {
                     Label(AppLocalization.string("Copy"), systemImage: "doc.on.doc")
+                }
+                .disabled(logs.isEmpty)
+                Button {
+                    compact.toggle()
+                } label: {
+                    Label(compact ? "Full" : "Compact", systemImage: compact ? "text.alignleft" : "text.justify")
                 }
                 .disabled(logs.isEmpty)
                 Button(action: onClear) {
