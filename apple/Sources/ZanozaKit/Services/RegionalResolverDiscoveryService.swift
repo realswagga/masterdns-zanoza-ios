@@ -3,7 +3,7 @@ import Foundation
 #if canImport(Darwin)
 import Darwin
 #endif
-#if canImport(SystemConfiguration)
+#if canImport(SystemConfiguration) && os(macOS)
 import SystemConfiguration
 #endif
 
@@ -75,10 +75,10 @@ public struct RegionalResolverDiscoveryReport: Equatable, Sendable {
 
 /// Builds a bounded candidate pool for the in-app ISP/carrier scan.
 ///
-/// iOS does not expose the DHCP DNS server list to an ordinary app.  The
-/// screen therefore accepts pasted DHCP/router output and can additionally
-/// probe a small /24 neighbourhood around a private seed or the active local
-/// IPv4 address.  This is intentional: a blind sweep of 10/8 is both unsafe
+/// The automatic path reads the active carrier/DHCP DNS list through the
+/// platform resolver configuration when available. It still accepts pasted
+/// DHCP/router output and can optionally probe a small /24 neighbourhood around
+/// a private seed. This is intentional: a blind sweep of 10/8 is both unsafe
 /// and incapable of distinguishing the user's carrier from unrelated hosts.
 public enum RegionalResolverDiscoveryService {
     public static let defaultNearbyRadius = 16
@@ -229,7 +229,7 @@ public enum CarrierResolverSeedService {
         // does not introduce an external Quad9/Cloudflare dependency.
         // The dynamic lookup keeps this package buildable on SDKs where Apple's
         // resolver header is not exposed to Swift.
-        #if canImport(SystemConfiguration)
+        #if canImport(SystemConfiguration) && os(macOS)
         // SystemConfiguration is the authoritative public Apple API for the
         // active DHCP/service DNS list. It is checked before a query-response
         // inference so a local forwarding stub cannot hide the carrier pair.
@@ -238,9 +238,11 @@ public enum CarrierResolverSeedService {
         }
         #endif
         #if canImport(Darwin)
-        let queried = querySystemResponders(names)
+        let configured = configuredSystemResolvers()
+        for value in configured { add(value, source: "dhcp:Apple resolver configuration") }
+        let queried = configured.isEmpty ? querySystemResponders(names) : []
         for value in queried { add(value, source: "carrier responder") }
-        if queried.isEmpty && !names.isEmpty {
+        if configured.isEmpty && queried.isEmpty && !names.isEmpty {
             issues.append("System DNS responder API returned no carrier address; trying resolver configuration files.")
         }
         #endif
@@ -274,7 +276,7 @@ public enum CarrierResolverSeedService {
         return CarrierResolverSeedReport(endpoints: endpoints, issues: issues, queriedDomains: names)
     }
 
-    #if canImport(SystemConfiguration)
+    #if canImport(SystemConfiguration) && os(macOS)
     private static func systemConfigurationServers() -> [String] {
         guard let store = SCDynamicStoreCreate(
             nil,
@@ -325,6 +327,12 @@ public enum CarrierResolverSeedService {
         UnsafeMutablePointer<CChar>?, UInt32,
         UnsafeMutablePointer<sockaddr>?, UnsafeMutablePointer<UInt32>?
     ) -> Int32
+    // Use raw pointers for the private C triple-pointer signature so this
+    // remains source-compatible across Darwin SDKs whose imported nested
+    // pointer spelling differs. The ABI is `struct sockaddr ***`.
+    private typealias DNSAllServerAddrs = @convention(c) (
+        OpaquePointer?, UnsafeMutableRawPointer?, UnsafeMutablePointer<UInt32>?
+    ) -> Void
 
     private static func symbol<T>(_ name: String, as type: T.Type) -> T? {
         let address = name.withCString { symbolName in
@@ -332,6 +340,55 @@ public enum CarrierResolverSeedService {
         }
         guard let address else { return nil }
         return unsafeBitCast(address, to: type)
+    }
+
+    private static func configuredSystemResolvers() -> [String] {
+        guard let open = symbol("dns_open", as: DNSOpen.self),
+              let all = symbol("dns_all_server_addrs", as: DNSAllServerAddrs.self),
+              let close = symbol("dns_free", as: DNSFree.self),
+              let handle = open(nil) else { return [] }
+        defer { close(handle) }
+
+        var list: UnsafeMutableRawPointer?
+        var count: UInt32 = 0
+        withUnsafeMutablePointer(to: &list) { pointer in
+            all(handle, UnsafeMutableRawPointer(pointer), &count)
+        }
+        guard let list, count > 0 else { return [] }
+        defer { free(list) }
+
+        let entries = list.assumingMemoryBound(to: UnsafeMutablePointer<sockaddr>?.self)
+        var values: [String] = []
+        var seen = Set<String>()
+        for index in 0..<Int(count) {
+            guard let address = entries[index] else { continue }
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            let length: socklen_t = {
+                switch Int32(address.pointee.sa_family) {
+                case AF_INET: return socklen_t(MemoryLayout<sockaddr_in>.size)
+                case AF_INET6: return socklen_t(MemoryLayout<sockaddr_in6>.size)
+                default: return socklen_t(MemoryLayout<sockaddr>.size)
+                }
+            }()
+            let status = getnameinfo(
+                address,
+                length,
+                &host,
+                socklen_t(host.count),
+                nil,
+                0,
+                NI_NUMERICHOST
+            )
+            free(UnsafeMutableRawPointer(address))
+            guard status == 0 else { continue }
+            let value = String(cString: host)
+            // MasterDNS resolver presets in this workflow are IPv4-oriented;
+            // retain IPv6 for future display only when the endpoint model can
+            // represent it, and never add a malformed address.
+            guard ResolverEndpoint(host: value) != nil, seen.insert(value).inserted else { continue }
+            values.append(value)
+        }
+        return values
     }
 
     private static func querySystemResponders(_ domains: [String]) -> [String] {
