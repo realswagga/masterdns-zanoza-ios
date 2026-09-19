@@ -196,12 +196,17 @@ public enum CarrierResolverSeedService {
             .prefix(12))
         let cap = min(max(maximum, 1), 128)
         var endpoints: [ResolverEndpoint] = []
+        var stubs: [ResolverEndpoint] = []
         var seen = Set<String>()
         var issues: [String] = []
 
         func add(_ host: String, source: String) {
             guard let endpoint = ResolverEndpoint(host: host), !endpoint.isProhibitedForScanning else {
                 if !host.isEmpty { issues.append("Skipped prohibited/invalid carrier resolver: \(host)") }
+                return
+            }
+            if endpoint.host.hasPrefix("127.") || endpoint.host == "0.0.0.0" {
+                if !stubs.contains(endpoint) { stubs.append(endpoint) }
                 return
             }
             guard !seen.contains(endpoint.id) else { return }
@@ -216,11 +221,11 @@ public enum CarrierResolverSeedService {
             _ = source // provenance is attached by RegionalResolverDiscoveryService
         }
 
-        # Querying the system's super-client returns the actual responder used
-        # for each normal lookup.  It follows DHCP/search-domain routing and
-        # does not introduce an external Quad9/Cloudflare dependency.
-        # The dynamic lookup keeps this package buildable on SDKs where Apple's
-        # resolver header is not exposed to Swift.
+        // Querying the system's super-client returns the actual responder used
+        // for each normal lookup. It follows DHCP/search-domain routing and
+        // does not introduce an external Quad9/Cloudflare dependency.
+        // The dynamic lookup keeps this package buildable on SDKs where Apple's
+        // resolver header is not exposed to Swift.
         #if canImport(Darwin)
         let queried = querySystemResponders(names)
         for value in queried { add(value, source: "carrier DHCP") }
@@ -238,12 +243,19 @@ public enum CarrierResolverSeedService {
                     let host = String(pieces[1]).trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
                     if host.hasPrefix("127.") || host == "0.0.0.0" {
                         issues.append("Only local resolver stub found in \(path): \(host)")
+                        if let endpoint = ResolverEndpoint(host: host), !stubs.contains(endpoint) {
+                            stubs.append(endpoint)
+                        }
                     } else {
                         add(host, source: "carrier DHCP configuration")
                     }
                 }
                 if !endpoints.isEmpty { break }
             }
+        }
+        if endpoints.isEmpty, let stub = stubs.first {
+            endpoints.append(stub)
+            issues.append("Only a local resolver stub was available; carrier DHCP address was not exposed")
         }
         if endpoints.isEmpty {
             issues.append("Carrier DHCP DNS servers are unavailable to this process.")

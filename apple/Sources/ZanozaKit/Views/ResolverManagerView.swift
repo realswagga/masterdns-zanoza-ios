@@ -8,10 +8,6 @@ public struct ResolverManagerView: View {
     let settings: AppSettings
     let isTunnelRunning: Bool
     let physicalInterface: PhysicalInterfaceMonitor.Snapshot
-    /// Non-empty for the autonomous carrier scan. Ordinary preset evaluation
-    /// keeps the historical delegated-domain probe.
-    let reconciliationDomains: [String] = []
-    let automaticSelection: Bool = false
 
     @State private var importDraft: ResolverImportDraft?
     @State private var isShowingFileImporter = false
@@ -337,6 +333,10 @@ struct ResolverScanView: View {
     let settings: AppSettings
     let isTunnelRunning: Bool
     let physicalInterface: PhysicalInterfaceMonitor.Snapshot
+    /// Non-empty for the autonomous carrier scan. Ordinary preset evaluation
+    /// keeps the historical delegated-domain probe.
+    let reconciliationDomains: [String] = []
+    let automaticSelection: Bool = false
 
     @State private var attempts = 5
     @State private var runNative = true
@@ -430,6 +430,13 @@ struct ResolverScanView: View {
             loggerStartIndex = appLogger.lines.count
             evaluatorLogs = Array(appLogger.lines.suffix(100))
             acquireIdleTimer()
+            if automaticSelection && task == nil && results.isEmpty {
+                // The regional workflow is intentionally hands-off after the
+                // user presses "Save pool and evaluate": reconcile the
+                // carrier domains, run MasterDNS MTU, and leave the best five
+                // resolvers selected for an explicit child-preset save.
+                DispatchQueue.main.async { start() }
+            }
         }
         .onChange(of: appLogger.lines.count) { _ in
             let newLines = appLogger.lines.dropFirst(min(loggerStartIndex, appLogger.lines.count))
