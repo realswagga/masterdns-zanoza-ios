@@ -257,7 +257,7 @@ public final class ProxySpeedTestService: @unchecked Sendable {
                 timeout: options.timeoutSeconds,
                 stage: stage,
                 progress: { bytes in
-                    let total = method == "POST" ? nil : expectedContentLength(from: url)
+                    let total = method == "POST" ? nil : self.expectedContentLength(from: url)
                     let fraction = total.map { min(1, Double(bytes) / Double(max(1, $0))) } ?? 0
                     progress(ProxySpeedTestProgress(
                         stage: stage,
