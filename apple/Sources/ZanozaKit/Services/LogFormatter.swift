@@ -149,7 +149,7 @@ public enum LogFormatter {
             let marker = "total valid resolvers after mtu testing"
             let start = input.range(of: marker, options: .caseInsensitive).map(\.upperBound) ?? input.startIndex
             let tail = input[start...]
-            let numbers = tail.matches(of: /\d+/).map(\.output)
+            let numbers = digitRuns(in: String(tail))
             if numbers.count >= 2 { return "[\(level)] MTU \(numbers[0])/\(numbers[1]) valid" }
         }
         if lower.contains("global mtu configuration") || lower.contains("selected synced upload mtu") {
@@ -201,6 +201,21 @@ public enum LogFormatter {
         guard let start = tail.firstIndex(where: { $0.isNumber }) else { return nil }
         let digits = tail[start...].prefix { $0.isNumber }
         return Int(digits)
+    }
+
+    private static func digitRuns(in input: String) -> [String] {
+        var values: [String] = []
+        var current = ""
+        for character in input {
+            if character.isNumber {
+                current.append(character)
+            } else if !current.isEmpty {
+                values.append(current)
+                current.removeAll(keepingCapacity: true)
+            }
+        }
+        if !current.isEmpty { values.append(current) }
+        return values
     }
 
     private static func value(after marker: String, in input: String) -> String? {
