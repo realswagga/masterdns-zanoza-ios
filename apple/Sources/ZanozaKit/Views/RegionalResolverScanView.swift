@@ -208,10 +208,33 @@ struct RegionalResolverScanView: View {
                         .font(.caption)
                         .foregroundStyle(.orange)
                 }
-                if let carrierSeedReport, !carrierSeedReport.endpoints.isEmpty {
-                    Text("Carrier DHCP responders: \(carrierSeedReport.endpoints.map(\.canonicalAddress).joined(separator: ", "))")
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
+            }
+            if let carrierSeedReport {
+                if !carrierSeedReport.endpoints.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Carrier seed stage · \(carrierSeedReport.sourceSummary.isEmpty ? "unknown source" : carrierSeedReport.sourceSummary)")
+                            .font(.caption.weight(.semibold))
+                        ForEach(carrierSeedReport.endpoints.prefix(12)) { endpoint in
+                            Text("\(endpoint.canonicalAddress) ← \(carrierSeedReport.source(for: endpoint))")
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.secondary)
+                        }
+                        if carrierSeedReport.endpoints.count > 12 {
+                            Text("… \(carrierSeedReport.endpoints.count - 12) more")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                } else {
+                    Label("No carrier resolver address was exposed by the system DNS API.", systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+                Button {
+                    ClipboardService.copy(carrierSeedReport.diagnosticText)
+                    append("I copied carrier DNS diagnostic report")
+                } label: {
+                    Label("Copy carrier diagnostics", systemImage: "doc.on.doc")
                 }
             }
         }
@@ -357,7 +380,11 @@ struct RegionalResolverScanView: View {
                 report = result
                 isDiscovering = false
                 if automatic {
-                    append("I carrier DHCP stage · responders=\(carrier.endpoints.count) · domains=\(domains.count)")
+                    let methods = carrier.discoveryMethods.isEmpty ? "unavailable" : carrier.discoveryMethods.joined(separator: ",")
+                    append("I carrier DHCP stage · responders=\(carrier.endpoints.count) · domains=\(domains.count) · method=\(methods)")
+                    for endpoint in carrier.endpoints.prefix(32) {
+                        append("I seed \(endpoint.canonicalAddress) ← \(carrier.source(for: endpoint))")
+                    }
                     for issue in carrier.issues.prefix(4) { append("W \(issue)") }
                 }
                 append("I discovery complete · candidates=\(result.candidates.count)")

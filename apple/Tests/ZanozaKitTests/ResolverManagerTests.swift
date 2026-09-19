@@ -155,6 +155,33 @@ final class LogFormatterTests: XCTestCase {
 }
 
 final class RegionalResolverDiscoveryTests: XCTestCase {
+    func testCarrierSeedReportRetainsProvenanceAndProducesSafeDiagnostics() throws {
+        let endpoint = try XCTUnwrap(ResolverEndpoint(host: "10.140.1.254"))
+        let report = CarrierResolverSeedReport(
+            endpoints: [endpoint],
+            issues: ["API fallback"],
+            queriedDomains: ["google.com", "max.ru"],
+            provenance: [endpoint.id: "dhcp:Apple resolver configuration"],
+            discoveryMethods: ["dhcp:Apple resolver configuration"]
+        )
+
+        XCTAssertEqual(report.source(for: endpoint), "dhcp:Apple resolver configuration")
+        XCTAssertEqual(report.sourceSummary, "dhcp:Apple resolver configuration: 1")
+        XCTAssertTrue(report.diagnosticText.contains("10.140.1.254 ← dhcp:Apple resolver configuration"))
+        XCTAssertTrue(report.diagnosticText.contains("google.com,max.ru"))
+        XCTAssertTrue(report.diagnosticText.contains("API fallback"))
+        XCTAssertFalse(report.diagnosticText.contains("encryptionKey"))
+    }
+
+    func testCarrierSeedReportDefaultsUnknownProvenanceWithoutBreakingOldInitializer() throws {
+        let endpoint = try XCTUnwrap(ResolverEndpoint(host: "10.140.1.254"))
+        let report = CarrierResolverSeedReport(endpoints: [endpoint])
+
+        XCTAssertEqual(report.source(for: endpoint), "unknown source")
+        XCTAssertEqual(report.discoveryMethods, [])
+        XCTAssertTrue(report.diagnosticText.contains("methods=unavailable"))
+    }
+
     func testCarrierSeedsArePrioritizedAndRetainProvenance() throws {
         let carrier = try XCTUnwrap(ResolverEndpoint(host: "10.140.1.254"))
         let pasted = try XCTUnwrap(ResolverEndpoint(host: "10.140.1.1"))

@@ -175,17 +175,59 @@ public struct CarrierResolverSeedReport: Equatable, Sendable {
     public let endpoints: [ResolverEndpoint]
     public let issues: [String]
     public let queriedDomains: [String]
+    /// Provenance keyed by canonical endpoint address. This lets the UI and
+    /// support logs distinguish DHCP configuration from responder inference
+    /// and resolver-file/stub fallbacks.
+    public let provenance: [String: String]
+    /// The platform mechanism(s) that produced the seed list.
+    public let discoveryMethods: [String]
 
-    public init(endpoints: [ResolverEndpoint], issues: [String] = [], queriedDomains: [String] = []) {
+    public init(
+        endpoints: [ResolverEndpoint],
+        issues: [String] = [],
+        queriedDomains: [String] = [],
+        provenance: [String: String] = [:],
+        discoveryMethods: [String] = []
+    ) {
         self.endpoints = endpoints
         self.issues = issues
         self.queriedDomains = queriedDomains
+        self.provenance = provenance
+        self.discoveryMethods = discoveryMethods
+    }
+
+    public func source(for endpoint: ResolverEndpoint) -> String {
+        provenance[endpoint.id] ?? "unknown source"
+    }
+
+    public var sourceSummary: String {
+        Dictionary(grouping: endpoints, by: { source(for: $0) })
+            .map { "\($0.key): \($0.value.count)" }
+            .sorted()
+            .joined(separator: " · ")
+    }
+
+    /// Copy-friendly diagnostic text. It deliberately excludes profile
+    /// credentials and tunnel keys, making it safe to attach to a bug report.
+    public var diagnosticText: String {
+        var lines = [
+            "Carrier DNS discovery",
+            "methods=\(discoveryMethods.isEmpty ? "unavailable" : discoveryMethods.joined(separator: ","))",
+            "domains=\(queriedDomains.joined(separator: ","))",
+            "endpoints=\(endpoints.count)"
+        ]
+        lines += endpoints.map { "- \($0.canonicalAddress) ← \(source(for: $0))" }
+        if !issues.isEmpty {
+            lines.append("issues:")
+            lines += issues.map { "- \($0)" }
+        }
+        return lines.joined(separator: "\n")
     }
 }
 
 public enum CarrierResolverSeedService {
     public static let defaultDomains = [
-        "google.com", "max.ru", "vk.ru", "megafon.ru", "yandex.ru", "cloudflare.com", "citylink.pro"
+        "google.com", "max.ru", "vk.ru", "megafon.ru", "yandex.ru", "cloudflare.com", "citylink.pro", "example.com"
     ]
     public static let defaultMaximum = 32
 
@@ -202,6 +244,13 @@ public enum CarrierResolverSeedService {
         var stubs: [ResolverEndpoint] = []
         var seen = Set<String>()
         var issues: [String] = []
+        var provenance: [String: String] = [:]
+        var discoveryMethods: [String] = []
+
+        func markMethod(_ value: String) {
+            guard !value.isEmpty, !discoveryMethods.contains(value) else { return }
+            discoveryMethods.append(value)
+        }
 
         func add(_ host: String, source: String) {
             guard let endpoint = ResolverEndpoint(host: host), !endpoint.isProhibitedForScanning else {
@@ -221,7 +270,8 @@ public enum CarrierResolverSeedService {
             }
             seen.insert(endpoint.id)
             endpoints.append(endpoint)
-            _ = source // provenance is attached by RegionalResolverDiscoveryService
+            provenance[endpoint.id] = source
+            markMethod(source)
         }
 
         // Querying the system's super-client returns the actual responder used
@@ -233,15 +283,19 @@ public enum CarrierResolverSeedService {
         // SystemConfiguration is the authoritative public Apple API for the
         // active DHCP/service DNS list. It is checked before a query-response
         // inference so a local forwarding stub cannot hide the carrier pair.
-        for value in systemConfigurationServers() {
+        let configuredBySystem = systemConfigurationServers()
+        for value in configuredBySystem {
             add(value, source: "dhcp:SystemConfiguration")
         }
+        if !configuredBySystem.isEmpty { markMethod("dhcp:SystemConfiguration") }
         #endif
         #if canImport(Darwin)
         let configured = configuredSystemResolvers()
         for value in configured { add(value, source: "dhcp:Apple resolver configuration") }
+        if !configured.isEmpty { markMethod("dhcp:Apple resolver configuration") }
         let queried = configured.isEmpty ? querySystemResponders(names) : []
         for value in queried { add(value, source: "carrier responder") }
+        if !queried.isEmpty { markMethod("carrier responder") }
         if configured.isEmpty && queried.isEmpty && !names.isEmpty {
             issues.append("System DNS responder API returned no carrier address; trying resolver configuration files.")
         }
@@ -263,17 +317,26 @@ public enum CarrierResolverSeedService {
                         add(host, source: "carrier DHCP configuration")
                     }
                 }
+                if !endpoints.isEmpty { markMethod("resolver file: \(path)") }
                 if !endpoints.isEmpty { break }
             }
         }
         if endpoints.isEmpty, let stub = stubs.first {
             endpoints.append(stub)
+            provenance[stub.id] = "stub:resolver file"
+            markMethod("local stub")
             issues.append("Only a local resolver stub was available; carrier DHCP address was not exposed")
         }
         if endpoints.isEmpty {
             issues.append("Carrier DHCP DNS servers are unavailable to this process.")
         }
-        return CarrierResolverSeedReport(endpoints: endpoints, issues: issues, queriedDomains: names)
+        return CarrierResolverSeedReport(
+            endpoints: endpoints,
+            issues: issues,
+            queriedDomains: names,
+            provenance: provenance,
+            discoveryMethods: discoveryMethods
+        )
     }
 
     #if canImport(SystemConfiguration) && os(macOS)
