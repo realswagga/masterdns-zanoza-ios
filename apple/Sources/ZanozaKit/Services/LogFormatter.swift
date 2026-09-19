@@ -135,7 +135,7 @@ public enum LogFormatter {
         let latency = parts.dropFirst(3).first(where: { $0.lowercased().hasSuffix("ms") })
         var output = "[I] \(ip) U=\(parts[1]) D=\(parts[2])"
         if let latency { output += " \(latency)" }
-        return output
+        return output.count > 50 ? String(output.prefix(50)) : output
     }
 
     private static func compactMTUSummary(_ input: String) -> String? {
