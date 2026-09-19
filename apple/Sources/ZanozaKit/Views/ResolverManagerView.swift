@@ -510,12 +510,17 @@ struct ResolverScanView: View {
             }
             if task == nil {
                 Button("Start evaluation", action: start)
-                    .disabled(isTunnelRunning || profile.domain.isEmpty || profile.encryptionKey.isEmpty)
+                    .disabled(isTunnelRunning || physicalInterface.foreignVPNActive || profile.domain.isEmpty || profile.encryptionKey.isEmpty)
             } else {
                 Button("Cancel", role: .destructive, action: cancel)
             }
             if isTunnelRunning {
                 Text("Disconnect Zanoza before native scanning.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+            if physicalInterface.foreignVPNActive {
+                Text("Disconnect other VPN apps before evaluating. Their Network Extension can capture resolver probes and invalidate MTU/throughput results.")
                     .font(.caption)
                     .foregroundStyle(.orange)
             }

@@ -187,9 +187,14 @@ struct RegionalResolverScanView: View {
             } label: {
                 Label(isDiscovering ? "Discovering…" : "Discover carrier / regional resolvers", systemImage: "antenna.radiowaves.left.and.right")
             }
-            .disabled(isDiscovering || isTunnelRunning)
+            .disabled(isDiscovering || isTunnelRunning || physicalInterface.foreignVPNActive)
             if isTunnelRunning {
                 Text("Disconnect Zanoza before probing carrier resolvers.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+            if physicalInterface.foreignVPNActive {
+                Text("Turn off Happ/Hiddify/Streisand and repeat discovery. A foreign VPN can replace the carrier DNS path and make the resolver list look reachable while the tunnel itself cannot start.")
                     .font(.caption)
                     .foregroundStyle(.orange)
             }
@@ -277,7 +282,7 @@ struct RegionalResolverScanView: View {
                 Label("Save pool and evaluate MTU / latency", systemImage: "waveform.path.ecg")
             }
             .buttonStyle(.borderedProminent)
-            .disabled(isTunnelRunning || profile.domain.isEmpty || profile.encryptionKey.isEmpty)
+            .disabled(isTunnelRunning || physicalInterface.foreignVPNActive || profile.domain.isEmpty || profile.encryptionKey.isEmpty)
 
             Button {
                 savePool(report)
