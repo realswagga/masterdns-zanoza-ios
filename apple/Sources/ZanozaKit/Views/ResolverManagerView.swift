@@ -335,8 +335,8 @@ struct ResolverScanView: View {
     let physicalInterface: PhysicalInterfaceMonitor.Snapshot
     /// Non-empty for the autonomous carrier scan. Ordinary preset evaluation
     /// keeps the historical delegated-domain probe.
-    let reconciliationDomains: [String] = []
-    let automaticSelection: Bool = false
+    let reconciliationDomains: [String]
+    let automaticSelection: Bool
 
     @State private var attempts = 5
     @State private var runNative = true
