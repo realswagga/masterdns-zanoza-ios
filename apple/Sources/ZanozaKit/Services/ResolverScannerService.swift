@@ -21,6 +21,11 @@ public struct ResolverScanOptions: Equatable {
     public var throughputEgressURL: URL
     public var throughputDownloadURL: URL
     public var throughputUploadURL: URL
+    /// Domains used for the carrier/DHCP reconciliation stage.  An empty
+    /// value preserves the historical single delegated-domain probe.
+    public var reconciliationDomains: [String]
+    /// DNS record types represented by the wire query (1=A, 28=AAAA).
+    public var reconciliationRecordTypes: [UInt16]
 
     public init(
         attempts: Int = 5,
@@ -37,7 +42,9 @@ public struct ResolverScanOptions: Equatable {
         throughputUploadBytes: Int = 32 * 1_024,
         throughputEgressURL: URL = URL(string: "http://checkip.amazonaws.com/")!,
         throughputDownloadURL: URL = URL(string: "http://speedtest.tele2.net/1MB.zip")!,
-        throughputUploadURL: URL = URL(string: "http://httpbin.org/post")!
+        throughputUploadURL: URL = URL(string: "http://httpbin.org/post")!,
+        reconciliationDomains: [String] = [],
+        reconciliationRecordTypes: [UInt16] = [1, 28]
     ) {
         self.attempts = min(max(attempts, 1), 20)
         self.timeoutSeconds = min(max(timeoutSeconds, 0.25), 10)
@@ -54,6 +61,12 @@ public struct ResolverScanOptions: Equatable {
         self.throughputEgressURL = throughputEgressURL
         self.throughputDownloadURL = throughputDownloadURL
         self.throughputUploadURL = throughputUploadURL
+        self.reconciliationDomains = Array(reconciliationDomains
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().trimmingCharacters(in: CharacterSet(charactersIn: ".")) }
+            .filter { !$0.isEmpty && $0.contains(".") }
+            .prefix(12))
+        let supported = reconciliationRecordTypes.filter { $0 == 1 || $0 == 28 }
+        self.reconciliationRecordTypes = supported.isEmpty ? [1] : Array(supported.prefix(4))
     }
 }
 
@@ -136,6 +149,8 @@ public final class ResolverScannerService: @unchecked Sendable {
         let directResults = await probeReachability(
             preset.endpoints,
             domain: profile.domain,
+            domains: options.reconciliationDomains,
+            recordTypes: options.reconciliationRecordTypes,
             options: options,
             progress: progress
         )
@@ -235,6 +250,8 @@ public final class ResolverScannerService: @unchecked Sendable {
     private func probeReachability(
         _ endpoints: [ResolverEndpoint],
         domain: String,
+        domains: [String],
+        recordTypes: [UInt16],
         options: ResolverScanOptions,
         progress: @escaping ProgressHandler
     ) async -> [ResolverEvaluation] {
@@ -246,7 +263,13 @@ public final class ResolverScannerService: @unchecked Sendable {
             while nextIndex < concurrency {
                 let endpoint = endpoints[nextIndex]
                 group.addTask { [self] in
-                    await evaluateReachability(endpoint, domain: domain, options: options)
+                    await evaluateReachability(
+                        endpoint,
+                        domain: domain,
+                        domains: domains,
+                        recordTypes: recordTypes,
+                        options: options
+                    )
                 }
                 nextIndex += 1
             }
@@ -264,7 +287,13 @@ public final class ResolverScannerService: @unchecked Sendable {
                 if nextIndex < endpoints.count {
                     let endpoint = endpoints[nextIndex]
                     group.addTask { [self] in
-                        await evaluateReachability(endpoint, domain: domain, options: options)
+                        await evaluateReachability(
+                            endpoint,
+                            domain: domain,
+                            domains: domains,
+                            recordTypes: recordTypes,
+                            options: options
+                        )
                     }
                     nextIndex += 1
                 }
@@ -277,6 +306,8 @@ public final class ResolverScannerService: @unchecked Sendable {
     private func evaluateReachability(
         _ endpoint: ResolverEndpoint,
         domain: String,
+        domains: [String],
+        recordTypes: [UInt16],
         options: ResolverScanOptions
     ) async -> ResolverEvaluation {
         if endpoint.isProhibitedForScanning {
@@ -286,28 +317,43 @@ public final class ResolverScannerService: @unchecked Sendable {
             return ResolverEvaluation(endpoint: endpoint, status: .failed, failureReason: "Private resolver probing is disabled")
         }
 
+        let probeDomains = domains.isEmpty ? [domain] : domains
         var latencies: [Double] = []
-        for _ in 0..<options.attempts {
-            if Task.isCancelled {
-                return ResolverEvaluation(endpoint: endpoint, status: .cancelled, attempts: latencies.count, replies: latencies.count)
-            }
-            let nonce = UUID().uuidString.prefix(8).lowercased()
-            let queryDomain = "z\(nonce).\(domain)"
-            if let latency = await probeOnce(
-                endpoint: endpoint,
-                domain: queryDomain,
-                timeout: options.timeoutSeconds
-            ) {
-                latencies.append(latency)
+        let totalAttempts = options.attempts * probeDomains.count * max(1, recordTypes.count)
+        for name in probeDomains {
+            for recordType in recordTypes {
+                for _ in 0..<options.attempts {
+                    if Task.isCancelled {
+                        return ResolverEvaluation(endpoint: endpoint, status: .cancelled, attempts: latencies.count, replies: latencies.count)
+                    }
+                    // Use a nonce only for the delegated profile domain. For
+                    // autonomous reconciliation the fixed public names are
+                    // intentionally used to compare cached/carrier behaviour.
+                    let queryDomain: String
+                    if domains.isEmpty {
+                        let nonce = UUID().uuidString.prefix(8).lowercased()
+                        queryDomain = "z\(nonce).\(name)"
+                    } else {
+                        queryDomain = name
+                    }
+                    if let latency = await probeOnce(
+                        endpoint: endpoint,
+                        domain: queryDomain,
+                        recordType: recordType,
+                        timeout: options.timeoutSeconds
+                    ) {
+                        latencies.append(latency)
+                    }
+                }
             }
         }
         let replies = latencies.count
-        let loss = 100 * (1 - Double(replies) / Double(options.attempts))
+        let loss = 100 * (1 - Double(replies) / Double(max(1, totalAttempts)))
         guard replies > 0 else {
             return ResolverEvaluation(
                 endpoint: endpoint,
                 status: .failed,
-                attempts: options.attempts,
+                attempts: totalAttempts,
                 replies: 0,
                 lossPercent: 100,
                 failureReason: "No matching DNS response"
@@ -320,7 +366,7 @@ public final class ResolverScannerService: @unchecked Sendable {
         return ResolverEvaluation(
             endpoint: endpoint,
             status: .reachable,
-            attempts: options.attempts,
+            attempts: totalAttempts,
             replies: replies,
             medianLatencyMS: median,
             jitterMS: jitter,
@@ -328,7 +374,12 @@ public final class ResolverScannerService: @unchecked Sendable {
         )
     }
 
-    private func probeOnce(endpoint: ResolverEndpoint, domain: String, timeout: Double) async -> Double? {
+    private func probeOnce(
+        endpoint: ResolverEndpoint,
+        domain: String,
+        recordType: UInt16 = 1,
+        timeout: Double
+    ) async -> Double? {
         let port = NWEndpoint.Port(rawValue: UInt16(endpoint.port)) ?? .init(integerLiteral: 53)
         let parameters = NWParameters.udp
         parameters.prohibitedInterfaceTypes = [.other]
@@ -336,7 +387,7 @@ public final class ResolverScannerService: @unchecked Sendable {
         parameters.prohibitConstrainedPaths = false
         let connection = NWConnection(host: NWEndpoint.Host(endpoint.host), port: port, using: parameters)
         let queue = DispatchQueue(label: "io.zanoza.resolver-probe.\(UUID().uuidString)")
-        let query = ProfilePinger.makeDnsQuery(for: domain)
+        let query = ProfilePinger.makeDnsQuery(for: domain, recordType: recordType)
         let expectedID = query.prefix(2)
 
         return await withCheckedContinuation { continuation in

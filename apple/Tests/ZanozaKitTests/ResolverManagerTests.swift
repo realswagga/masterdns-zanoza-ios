@@ -155,6 +155,29 @@ final class LogFormatterTests: XCTestCase {
 }
 
 final class RegionalResolverDiscoveryTests: XCTestCase {
+    func testCarrierSeedsArePrioritizedAndRetainProvenance() throws {
+        let carrier = try XCTUnwrap(ResolverEndpoint(host: "10.140.1.254"))
+        let pasted = try XCTUnwrap(ResolverEndpoint(host: "10.140.1.1"))
+        let report = RegionalResolverDiscoveryService.discover(
+            options: RegionalResolverDiscoveryOptions(
+                seedText: pasted.canonicalAddress,
+                carrierSeedEndpoints: [carrier],
+                expandNearby: false
+            )
+        )
+        XCTAssertEqual(report.candidates.map(\.endpoint), [carrier, pasted])
+        XCTAssertEqual(report.candidates.first?.source, "carrier DHCP")
+    }
+
+    func testAutonomousDomainSetContainsCarrierAndNeutralControls() {
+        XCTAssertTrue(AutonomousResolverDefaults.domains.contains("google.com"))
+        XCTAssertTrue(AutonomousResolverDefaults.domains.contains("max.ru"))
+        XCTAssertTrue(AutonomousResolverDefaults.domains.contains("vk.ru"))
+        XCTAssertTrue(AutonomousResolverDefaults.domains.contains("megafon.ru"))
+        XCTAssertTrue(AutonomousResolverDefaults.domains.contains("example.com"))
+        XCTAssertEqual(AutonomousResolverDefaults.recordTypes, [1, 28])
+    }
+
     func testDiscoveryExpandsOnlyBoundedPrivateNeighbourhood() throws {
         let report = RegionalResolverDiscoveryService.discover(
             options: RegionalResolverDiscoveryOptions(
@@ -189,6 +212,15 @@ final class RegionalResolverDiscoveryTests: XCTestCase {
 }
 
 final class ProxySpeedTestParsingTests: XCTestCase {
+    func testAutonomousScanOptionsNormalizeDomainsAndRecordTypes() {
+        let options = ResolverScanOptions(
+            reconciliationDomains: [" google.com. ", "", "max.ru", "invalid"],
+            reconciliationRecordTypes: [1, 28, 15, 1]
+        )
+        XCTAssertEqual(options.reconciliationDomains, ["google.com", "max.ru"])
+        XCTAssertEqual(options.reconciliationRecordTypes, [1, 28, 1])
+    }
+
     func testUploadPayloadIsNotTriviallyCompressible() {
         let payload = ProxySpeedTestService.makeIncompressiblePayload(byteCount: 4_096)
         XCTAssertEqual(payload.count, 4_096)

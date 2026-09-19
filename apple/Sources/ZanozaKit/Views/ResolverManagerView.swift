@@ -8,6 +8,10 @@ public struct ResolverManagerView: View {
     let settings: AppSettings
     let isTunnelRunning: Bool
     let physicalInterface: PhysicalInterfaceMonitor.Snapshot
+    /// Non-empty for the autonomous carrier scan. Ordinary preset evaluation
+    /// keeps the historical delegated-domain probe.
+    let reconciliationDomains: [String] = []
+    let automaticSelection: Bool = false
 
     @State private var importDraft: ResolverImportDraft?
     @State private var isShowingFileImporter = false
@@ -448,6 +452,11 @@ struct ResolverScanView: View {
         Section("Scan") {
             LabeledContent("Preset", value: preset.name)
             LabeledContent("Resolvers", value: String(preset.endpoints.count))
+            if !reconciliationDomains.isEmpty {
+                Text("Carrier reconciliation: \(reconciliationDomains.joined(separator: ", ")) · A/AAAA")
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+            }
             Stepper("Attempts: \(attempts)", value: $attempts, in: 1...10)
             Toggle("MasterDNS encrypted MTU probe", isOn: $runNative)
             Toggle("Single-resolver throughput test", isOn: $runThroughput)
@@ -593,7 +602,9 @@ struct ResolverScanView: View {
                         attempts: attempts,
                         runMasterDnsMTUProbe: runNative,
                         runThroughputProbe: runThroughput,
-                        throughputCandidateLimit: throughputCandidates
+                        throughputCandidateLimit: throughputCandidates,
+                        reconciliationDomains: reconciliationDomains,
+                        reconciliationRecordTypes: AutonomousResolverDefaults.recordTypes
                     ),
                     runtimeDirectory: scanRuntimeDirectory(),
                     boundInterface: physicalInterface.name,
@@ -614,12 +625,16 @@ struct ResolverScanView: View {
                 guard !Task.isCancelled else { return }
                 await MainActor.run {
                     results = output
-                    selectedResolverIDs = Set(output.filter(\.isSelectable).map(\.id))
+                    let eligible = output.filter { $0.isSelectable }
+                    selectedResolverIDs = automaticSelection
+                        ? Set(eligible.sorted { $0.rankingScore(for: .balanced) > $1.rankingScore(for: .balanced) }
+                            .prefix(5).map(\.id))
+                        : Set(eligible.map(\.id))
                     topCount = min(5, Double(max(1, selectableResultCount)))
                     var updated = preset
                     updated.evaluations = output
                     store.save(updated)
-                    evaluatorLogs.append("Evaluation complete · \(selectedResolverIDs.count) selectable")
+                    evaluatorLogs.append("Evaluation complete · \(selectedResolverIDs.count) selected best of \(eligible.count) selectable")
                     task = nil
                 }
             } catch is CancellationError {

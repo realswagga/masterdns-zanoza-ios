@@ -1,7 +1,7 @@
 import Foundation
 import Network
 
-public struct ResolverEndpoint: Codable, Hashable, Identifiable {
+public struct ResolverEndpoint: Codable, Hashable, Identifiable, Sendable {
     public let host: String
     public let port: Int
 

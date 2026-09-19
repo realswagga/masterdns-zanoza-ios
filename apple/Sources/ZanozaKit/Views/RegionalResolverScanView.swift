@@ -16,6 +16,9 @@ struct RegionalResolverScanView: View {
 
     @State private var seedText: String
     @State private var selectedProviderID: String = AppSettings.noResolverProviderID
+    @State private var automaticCarrierDiscovery = true
+    @State private var autonomousDomainsText = AutonomousResolverDefaults.domains.joined(separator: "\n")
+    @State private var carrierSeedReport: CarrierResolverSeedReport?
     @State private var expandNearby = true
     @State private var nearbyRadius = RegionalResolverDiscoveryService.defaultNearbyRadius
     @State private var maximumCandidates = 512
@@ -74,7 +77,9 @@ struct RegionalResolverScanView: View {
                     profile: profile,
                     settings: settings,
                     isTunnelRunning: isTunnelRunning,
-                    physicalInterface: physicalInterface
+                    physicalInterface: physicalInterface,
+                    reconciliationDomains: autonomousDomains,
+                    automaticSelection: true
                 )
             }
         }
@@ -122,7 +127,8 @@ struct RegionalResolverScanView: View {
             }
             .disabled(isLoadingProvider || selectedProviderID.isEmpty)
 
-            Text("Paste DHCP/router DNS addresses, resolver scan output, or a bounded CIDR. The app cannot read an iOS DHCP DNS list directly, so pasted seeds remain visible and auditable.")
+            Toggle("Use carrier-served DHCP DNS automatically when seeds are empty", isOn: $automaticCarrierDiscovery)
+            Text("Automatic mode asks the system DNS client which carrier resolver answered safe A/AAAA lookups first. If iOS does not expose that address, paste the DHCP/router list here; no public Quad9/Cloudflare fallback is inserted.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             TextEditor(text: $seedText)
@@ -131,7 +137,20 @@ struct RegionalResolverScanView: View {
                 #if os(iOS)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
-                #endif
+            #endif
+
+            DisclosureGroup("Reconciliation domains") {
+                TextEditor(text: $autonomousDomainsText)
+                    .font(.system(.footnote, design: .monospaced))
+                    .frame(minHeight: 90)
+                    #if os(iOS)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    #endif
+                Text("One hostname per line. These are queried through each carrier resolver before MasterDNS MTU testing.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
 
             Toggle("Probe nearby private /24 addresses", isOn: $expandNearby)
             if expandNearby {
@@ -188,6 +207,11 @@ struct RegionalResolverScanView: View {
                     Label(issue, systemImage: "exclamationmark.triangle")
                         .font(.caption)
                         .foregroundStyle(.orange)
+                }
+                if let carrierSeedReport, !carrierSeedReport.endpoints.isEmpty {
+                    Text("Carrier DHCP responders: \(carrierSeedReport.endpoints.map(\.canonicalAddress).joined(separator: ", "))")
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
                 }
             }
         }
@@ -297,23 +321,45 @@ struct RegionalResolverScanView: View {
         task?.cancel()
         isDiscovering = true
         report = nil
-        append("I discovery started · seeds=\(seedText.split(whereSeparator: { $0.isNewline }).count) · nearby=\(expandNearby)")
-        let options = RegionalResolverDiscoveryOptions(
-            seedText: seedText,
-            localIPv4: physicalInterface.ipv4,
-            expandNearby: expandNearby,
-            nearbyRadius: nearbyRadius,
-            maximumCandidates: maximumCandidates
-        )
+        let explicitSeedCount = seedText.split(whereSeparator: { $0.isNewline }).count
+        append("I discovery started · explicit seeds=\(explicitSeedCount) · nearby=\(expandNearby)")
+        let automatic = automaticCarrierDiscovery
+            && seedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && selectedProviderID == AppSettings.noResolverProviderID
+        let domains = autonomousDomains
         task = Task {
             // Yield once so the progress indicator is painted before parsing a
             // large imported list.
             await Task.yield()
-            let result = RegionalResolverDiscoveryService.discover(options: options)
+            let seed = seedText
+            let localIPv4 = physicalInterface.ipv4
+            let radius = nearbyRadius
+            let expand = expandNearby
+            let cap = maximumCandidates
+            let carrier = await Task.detached(priority: .userInitiated) {
+                automatic
+                    ? CarrierResolverSeedService.discover(domains: domains)
+                    : CarrierResolverSeedReport(endpoints: [], issues: [], queriedDomains: [])
+            }.value
+            let result = await Task.detached(priority: .userInitiated) {
+                RegionalResolverDiscoveryService.discover(options: RegionalResolverDiscoveryOptions(
+                    seedText: seed,
+                    localIPv4: localIPv4,
+                    carrierSeedEndpoints: carrier.endpoints,
+                    expandNearby: expand,
+                    nearbyRadius: radius,
+                    maximumCandidates: cap
+                ))
+            }.value
             guard !Task.isCancelled else { return }
             await MainActor.run {
+                carrierSeedReport = carrier
                 report = result
                 isDiscovering = false
+                if automatic {
+                    append("I carrier DHCP stage · responders=\(carrier.endpoints.count) · domains=\(domains.count)")
+                    for issue in carrier.issues.prefix(4) { append("W \(issue)") }
+                }
                 append("I discovery complete · candidates=\(result.candidates.count)")
                 for issue in result.issues.prefix(4) { append("W \(issue)") }
                 task = nil
@@ -350,6 +396,14 @@ struct RegionalResolverScanView: View {
             return "\(provider.displayName) regional scan"
         }
         return "Carrier regional scan · \(report.candidates.count)"
+    }
+
+    private var autonomousDomains: [String] {
+        let values = autonomousDomainsText
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().trimmingCharacters(in: CharacterSet(charactersIn: ".")) }
+            .filter { !$0.isEmpty && $0.contains(".") }
+        return values.isEmpty ? AutonomousResolverDefaults.domains : Array(values.prefix(12))
     }
 
     private func append(_ line: String) {

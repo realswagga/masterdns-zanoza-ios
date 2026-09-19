@@ -100,6 +100,13 @@ public final class ProfilePinger: @unchecked Sendable {
     }
 
     static func makeDnsQuery(for domain: String) -> Data {
+        makeDnsQuery(for: domain, recordType: 1)
+    }
+
+    /// Builds a small standard recursive DNS query.  The resolver scanner uses
+    /// A and AAAA probes to reconcile carrier resolvers; profile ping retains
+    /// the A-record default for compatibility.
+    static func makeDnsQuery(for domain: String, recordType: UInt16) -> Data {
         var data = Data()
         let id = UInt16.random(in: 1...UInt16.max)
         data.append(UInt8((id >> 8) & 0xff))
@@ -117,7 +124,8 @@ public final class ProfilePinger: @unchecked Sendable {
             data.append(contentsOf: bytes.prefix(len))
         }
         data.append(0x00)                     // root terminator
-        data.append(contentsOf: [0x00, 0x01]) // QTYPE=A
+        data.append(UInt8((recordType >> 8) & 0xff))
+        data.append(UInt8(recordType & 0xff))
         data.append(contentsOf: [0x00, 0x01]) // QCLASS=IN
         return data
     }
