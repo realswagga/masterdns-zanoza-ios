@@ -45,11 +45,13 @@ public struct ProxySpeedTestView: View {
                             Text(progress?.detail ?? "Starting…")
                         }
                     } else {
-                        ProgressView {
-                            Text(stageTitle(stage))
-                        } currentValueLabel: {
-                            Text(progress?.detail ?? "Starting…")
-                        }
+                        ProgressView()
+                        Text(stageTitle(stage))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text(progress?.detail ?? "Starting…")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
                     }
                     if let progress, let total = progress.totalBytes {
                         Text("\(ByteCountFormatter.string(fromByteCount: Int64(progress.completedBytes), countStyle: .file)) / \(ByteCountFormatter.string(fromByteCount: Int64(total), countStyle: .file))")

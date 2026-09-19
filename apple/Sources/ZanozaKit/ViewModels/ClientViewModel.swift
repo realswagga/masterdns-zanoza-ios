@@ -49,6 +49,19 @@ public final class ClientViewModel: ObservableObject {
             profileStore.save(profiles)
             settingsStore.save(settings)
         }
+        if !settings.didMigrateDiagnosticLevel {
+            // Profiles persisted by the previous full-config release were
+            // commonly left at WARN. Upgrade those implicit defaults once so
+            // MTU/session counters are visible; users can still choose WARN
+            // explicitly afterwards.
+            for index in profiles.indices where profiles[index].configuration.logLevel == .warn {
+                profiles[index].configuration.logLevel = .info
+                profiles[index].configuration.normalize()
+            }
+            settings.didMigrateDiagnosticLevel = true
+            profileStore.save(profiles)
+            settingsStore.save(settings)
+        }
         selectedProfileID = profiles.first?.id
         if let selected = profiles.first { draft = selected }
 

@@ -19,6 +19,9 @@ public struct AppSettings: Codable, Equatable {
     public var useFastResolvers: Bool
     public var systemVPNEnabled: Bool
     public var didMigrateProfileListeners: Bool
+    /// One-time migration for builds whose generated MasterDNS profiles used
+    /// WARN by default. INFO is now the diagnostic baseline.
+    public var didMigrateDiagnosticLevel: Bool
 
     public init(
         socksPort: Int = Self.defaultSocksPort,
@@ -29,7 +32,8 @@ public struct AppSettings: Codable, Equatable {
         resolverProviderID: String = Self.noResolverProviderID,
         useFastResolvers: Bool = false,
         systemVPNEnabled: Bool = false,
-        didMigrateProfileListeners: Bool = true
+        didMigrateProfileListeners: Bool = true,
+        didMigrateDiagnosticLevel: Bool = false
     ) {
         self.socksPort = Self.normalizedSocksPort(socksPort)
         self.socksUser = socksUser
@@ -40,6 +44,7 @@ public struct AppSettings: Codable, Equatable {
         self.useFastResolvers = useFastResolvers
         self.systemVPNEnabled = systemVPNEnabled
         self.didMigrateProfileListeners = didMigrateProfileListeners
+        self.didMigrateDiagnosticLevel = didMigrateDiagnosticLevel
     }
 
     public init(from decoder: Decoder) throws {
@@ -56,6 +61,7 @@ public struct AppSettings: Codable, Equatable {
         systemVPNEnabled = try container.decodeIfPresent(Bool.self, forKey: .systemVPNEnabled) ?? false
         // A missing key identifies settings written by Zanoza 0.1.x.
         didMigrateProfileListeners = try container.decodeIfPresent(Bool.self, forKey: .didMigrateProfileListeners) ?? false
+        didMigrateDiagnosticLevel = try container.decodeIfPresent(Bool.self, forKey: .didMigrateDiagnosticLevel) ?? false
     }
 
     public static func normalizedSocksPort(_ port: Int) -> Int {

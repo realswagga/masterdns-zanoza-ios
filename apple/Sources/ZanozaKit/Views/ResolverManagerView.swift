@@ -260,7 +260,7 @@ private struct ResolverImportEditor: View {
                         }
                     }
                 } else {
-                    Text(draft.parentID.flatMap { id in parents.first(where: { $0.id == id })?.name.map { "Subpreset of \($0)" } } ?? "Parent preset")
+                    Text(parentDescription)
                         .foregroundStyle(.secondary)
                 }
             }
@@ -292,6 +292,14 @@ private struct ResolverImportEditor: View {
         }
         .onAppear { report = ResolverImportParser.parse(draft.text) }
         .onChange(of: draft.text) { report = ResolverImportParser.parse($0) }
+    }
+
+    private var parentDescription: String {
+        guard let parentID = draft.parentID,
+              let parent = parents.first(where: { $0.id == parentID }) else {
+            return "Parent preset"
+        }
+        return "Subpreset of \(parent.name)"
     }
 }
 
@@ -459,7 +467,7 @@ private struct ResolverScanView: View {
 
     @ViewBuilder
     private var selectionSection: some View {
-        Section("Create evaluated subpreset") {
+        Section {
             Picker("Sort and rank", selection: $rankingMode) {
                 ForEach(ResolverRankingMode.allCases) { mode in
                     Text(mode.title).tag(mode)
@@ -505,6 +513,8 @@ private struct ResolverScanView: View {
             Button("Create preset from selected resolvers", action: saveSelected)
                 .buttonStyle(.borderedProminent)
                 .disabled(selectedResolverIDs.isEmpty)
+        } header: {
+            Text("Create evaluated subpreset")
         } footer: {
             Text("Top-N only changes the green selections. A new subpreset is written only after you press Create.")
         }
