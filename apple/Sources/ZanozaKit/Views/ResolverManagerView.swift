@@ -360,6 +360,26 @@ struct ResolverScanView: View {
 
     private let scanner = ResolverScannerService()
 
+    init(
+        store: ResolverPresetStore,
+        preset: ResolverPreset,
+        profile: ConnectionProfile,
+        settings: AppSettings,
+        isTunnelRunning: Bool,
+        physicalInterface: PhysicalInterfaceMonitor.Snapshot,
+        reconciliationDomains: [String] = [],
+        automaticSelection: Bool = false
+    ) {
+        self.store = store
+        self.preset = preset
+        self.profile = profile
+        self.settings = settings
+        self.isTunnelRunning = isTunnelRunning
+        self.physicalInterface = physicalInterface
+        self.reconciliationDomains = reconciliationDomains
+        self.automaticSelection = automaticSelection
+    }
+
     var body: some View {
         Form {
             scanSection
