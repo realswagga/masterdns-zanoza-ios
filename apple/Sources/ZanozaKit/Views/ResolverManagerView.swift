@@ -348,6 +348,8 @@ struct ResolverScanView: View {
     @State private var errorMessage: String?
     @State private var presetMessage: String?
     @State private var task: Task<Void, Never>?
+    @State private var throughputTask: Task<Void, Never>?
+    @State private var throughputResolverID: String?
     @State private var rankingMode: ResolverRankingMode = .balanced
     @State private var topCount = 5.0
     @State private var evaluatorLogs: [String] = []
@@ -508,11 +510,17 @@ struct ResolverScanView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(3)
             }
-            if task == nil {
+            if task == nil && throughputTask == nil {
                 Button("Start evaluation", action: start)
                     .disabled(isTunnelRunning || physicalInterface.foreignVPNActive || profile.domain.isEmpty || profile.encryptionKey.isEmpty)
             } else {
                 Button("Cancel", role: .destructive, action: cancel)
+            }
+            if let throughputResolverID,
+               let active = results.first(where: { $0.id == throughputResolverID }) {
+                Text("Testing " + active.endpoint.canonicalAddress + " through its own MasterDNS session…")
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
             }
             if isTunnelRunning {
                 Text("Disconnect Zanoza before native scanning.")
@@ -590,11 +598,16 @@ struct ResolverScanView: View {
                     result: result,
                     isSelected: selectedResolverIDs.contains(result.id),
                     isSelectable: result.isSelectable(for: rankingMode),
+                    isTestingThroughput: throughputResolverID == result.id,
+                    canTestThroughput: canTestThroughput(result),
                     detail: resultDetail(result),
                     onToggle: { toggleSelection(result) },
-                    onCopy: { ClipboardService.copy(result.endpoint.canonicalAddress) }
+                    onCopy: { ClipboardService.copy(result.endpoint.canonicalAddress) },
+                    onThroughputTest: { testThroughput(result) }
                 )
             }
+        } footer: {
+            Text("Long-press any resolver to run a selective throughput test. Its bytes, speed, ping, and partial-window status are written back to this evaluation.")
         }
     }
 
@@ -687,7 +700,168 @@ struct ResolverScanView: View {
     private func cancel() {
         scanner.cancelNativeScan()
         task?.cancel()
+        throughputTask?.cancel()
         task = nil
+        throughputTask = nil
+        throughputResolverID = nil
+    }
+
+    /// Runs one resolver through the same isolated MasterDNS + proxy speed
+    /// test used by bulk evaluation. The context menu on each result row calls
+    /// this method, so a user can refresh a single stale or interesting
+    /// resolver without paying for another full-pool scan.
+    private func testThroughput(_ result: ResolverEvaluation) {
+        guard task == nil, throughputTask == nil else { return }
+        guard canTestThroughput(result) else {
+            if result.endpoint.isProhibitedForScanning {
+                presetMessage = "This resolver is in a prohibited scan range."
+            } else if isTunnelRunning || physicalInterface.foreignVPNActive {
+                presetMessage = "Disconnect Zanoza and other VPN apps before testing a resolver."
+            }
+            return
+        }
+
+        let endpoint = result.endpoint
+        let service = scanner
+        let options = ResolverScanOptions(
+            attempts: attempts,
+            runMasterDnsMTUProbe: runNative,
+            runThroughputProbe: true,
+            throughputCandidateLimit: 1,
+            reconciliationDomains: reconciliationDomains,
+            reconciliationRecordTypes: AutonomousResolverDefaults.recordTypes
+        )
+        let runtimeDirectory = scanRuntimeDirectory()
+        throughputResolverID = endpoint.id
+        progress = ResolverScanProgress(
+            stage: .throughput,
+            completed: 0,
+            total: 1,
+            accepted: 0,
+            detail: "Testing " + endpoint.canonicalAddress,
+            fraction: 0
+        )
+        evaluatorLogs.append("Selective throughput started · " + endpoint.canonicalAddress)
+
+        throughputTask = Task {
+            do {
+                let measured = try await service.testThroughput(
+                    for: endpoint,
+                    profile: profile,
+                    settings: settings,
+                    options: options,
+                    runtimeDirectory: runtimeDirectory,
+                    boundInterface: physicalInterface.name,
+                    boundIPv4: physicalInterface.ipv4,
+                    boundIPv6: physicalInterface.ipv6,
+                    progress: { update in
+                        Task { @MainActor in
+                            guard self.throughputResolverID == endpoint.id else { return }
+                            let detail = endpoint.canonicalAddress + ": " + update.detail
+                            self.progress = ResolverScanProgress(
+                                stage: .throughput,
+                                completed: 0,
+                                total: 1,
+                                accepted: 0,
+                                detail: detail,
+                                fraction: update.stage == .upload ? 0.9 : min(0.99, update.fraction)
+                            )
+                            self.appendEvaluationProgress(self.progress!)
+                        }
+                    }
+                )
+                try Task.checkCancellation()
+                await MainActor.run {
+                    self.applyThroughputResult(measured, to: endpoint.id)
+                    var detail = endpoint.canonicalAddress
+                        + " · ↓ "
+                        + ByteCountFormatter.string(fromByteCount: Int64(measured.downloadedBytes), countStyle: .file)
+                        + " / " + String(format: "%.2f Mbit/s", measured.downloadMbps)
+                        + " / ping " + String(format: "%.0f ms", measured.downloadPingMS)
+                    if measured.downloadTimedOut { detail += " · window ended with data" }
+                    if let uploadFailure = measured.uploadFailureReason {
+                        detail += " · upload note: " + uploadFailure
+                    }
+                    self.progress = ResolverScanProgress(
+                        stage: .throughput,
+                        completed: 1,
+                        total: 1,
+                        accepted: 1,
+                        detail: detail,
+                        fraction: 1,
+                        snapshot: self.results
+                    )
+                    self.appendEvaluationProgress(self.progress!)
+                    self.evaluatorLogs.append("Selective throughput complete · " + detail)
+                    self.throughputTask = nil
+                    self.throughputResolverID = nil
+                }
+            } catch is CancellationError {
+                await MainActor.run {
+                    self.evaluatorLogs.append("Selective throughput cancelled · \(endpoint.canonicalAddress)")
+                    self.throughputTask = nil
+                    self.throughputResolverID = nil
+                }
+            } catch {
+                await MainActor.run {
+                    self.recordThroughputFailure(error, for: endpoint.id)
+                    self.progress = ResolverScanProgress(
+                        stage: .throughput,
+                        completed: 1,
+                        total: 1,
+                        accepted: 0,
+                        detail: endpoint.canonicalAddress + ": " + error.localizedDescription,
+                        fraction: 1,
+                        snapshot: self.results
+                    )
+                    self.appendEvaluationProgress(self.progress!)
+                    self.evaluatorLogs.append("Selective throughput failed · \(endpoint.canonicalAddress) · \(error.localizedDescription)")
+                    self.throughputTask = nil
+                    self.throughputResolverID = nil
+                }
+            }
+        }
+    }
+
+    private func canTestThroughput(_ result: ResolverEvaluation) -> Bool {
+        guard task == nil, throughputTask == nil else { return false }
+        guard !isTunnelRunning, !physicalInterface.foreignVPNActive else { return false }
+        guard !profile.domain.isEmpty, !profile.encryptionKey.isEmpty else { return false }
+        return !result.endpoint.isProhibitedForScanning
+    }
+
+    private func applyThroughputResult(_ measured: ProxySpeedTestResult, to endpointID: String) {
+        guard let index = results.firstIndex(where: { $0.id == endpointID }) else { return }
+        var updated = results[index]
+        updated.downloadMbps = measured.downloadMbps
+        updated.uploadMbps = measured.uploadFailureReason == nil ? measured.uploadMbps : nil
+        updated.downloadedBytes = measured.downloadedBytes
+        updated.downloadElapsedSeconds = measured.downloadElapsedSeconds
+        updated.downloadPingMS = measured.downloadPingMS
+        updated.downloadTimedOut = measured.downloadTimedOut
+        updated.tunnelLatencyMS = measured.proxyHandshakeMS
+        updated.failureReason = measured.uploadFailureReason.map { "Throughput upload: \($0)" }
+        results[index] = updated
+        persistEvaluations()
+    }
+
+    private func recordThroughputFailure(_ error: Error, for endpointID: String) {
+        guard let index = results.firstIndex(where: { $0.id == endpointID }) else { return }
+        var updated = results[index]
+        let message = "Throughput: \(error.localizedDescription)"
+        if let existing = updated.failureReason, !existing.isEmpty {
+            updated.failureReason = existing + "; " + message
+        } else {
+            updated.failureReason = message
+        }
+        results[index] = updated
+        persistEvaluations()
+    }
+
+    private func persistEvaluations() {
+        var updated = preset
+        updated.evaluations = results
+        store.save(updated)
     }
 
     private func toggleSelection(_ result: ResolverEvaluation) {
@@ -809,15 +983,24 @@ private struct ResolverEvaluationRow: View {
     let result: ResolverEvaluation
     let isSelected: Bool
     let isSelectable: Bool
+    let isTestingThroughput: Bool
+    let canTestThroughput: Bool
     let detail: String
     let onToggle: () -> Void
     let onCopy: () -> Void
+    let onThroughputTest: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Image(systemName: selectionIcon)
-                    .foregroundStyle(selectionColor)
+                if isTestingThroughput {
+                    ProgressView()
+                        .controlSize(.small)
+                        .frame(width: 18, height: 18)
+                } else {
+                    Image(systemName: selectionIcon)
+                        .foregroundStyle(selectionColor)
+                }
                 Text(result.endpoint.canonicalAddress)
                     .font(.callout.monospaced())
                 Spacer()
@@ -835,6 +1018,13 @@ private struct ResolverEvaluationRow: View {
             Button(action: onCopy) {
                 Label("Copy IP address", systemImage: "doc.on.doc")
             }
+            Button(action: onThroughputTest) {
+                Label(
+                    isTestingThroughput ? "Testing throughput…" : "Test throughput",
+                    systemImage: "speedometer"
+                )
+            }
+            .disabled(!canTestThroughput || isTestingThroughput)
             if isSelectable {
                 Button(action: onToggle) {
                     Label(isSelected ? "Deselect" : "Select", systemImage: isSelected ? "minus.circle" : "checkmark.circle")

@@ -124,6 +124,7 @@ public enum ResolverScannerError: LocalizedError {
     case nativeScannerUnavailable
     case nativeScanFailed(String)
     case invalidNativeResponse
+    case prohibitedResolver
 
     public var errorDescription: String? {
         switch self {
@@ -132,6 +133,7 @@ public enum ResolverScannerError: LocalizedError {
         case .nativeScannerUnavailable: "The MasterDNS scanner is unavailable in this build."
         case .nativeScanFailed(let reason): "MasterDNS scan failed: \(reason)"
         case .invalidNativeResponse: "MasterDNS returned an invalid scan result."
+        case .prohibitedResolver: "This resolver is in a prohibited scan range."
         }
     }
 }
@@ -257,6 +259,37 @@ public final class ResolverScannerService: @unchecked Sendable {
         #if canImport(Mobile)
         MobileCancelScan()
         #endif
+    }
+
+    /// Runs the same isolated MasterDNS session and bounded proxy throughput
+    /// measurement used by the bulk evaluator, but for exactly one resolver.
+    /// This is intentionally public so the results list can re-test a row
+    /// without re-running reachability/MTU evaluation for the whole preset.
+    public func testThroughput(
+        for endpoint: ResolverEndpoint,
+        profile: ConnectionProfile,
+        settings: AppSettings,
+        options: ResolverScanOptions,
+        runtimeDirectory: URL,
+        boundInterface: String = "",
+        boundIPv4: String = "",
+        boundIPv6: String = "",
+        progress: @escaping @Sendable (ProxySpeedTestProgress) -> Void = { _ in }
+    ) async throws -> ProxySpeedTestResult {
+        guard !endpoint.isProhibitedForScanning else {
+            throw ResolverScannerError.prohibitedResolver
+        }
+        return try await measureSingleResolver(
+            endpoint,
+            profile: profile,
+            settings: settings,
+            options: options,
+            runtimeDirectory: runtimeDirectory,
+            boundInterface: boundInterface,
+            boundIPv4: boundIPv4,
+            boundIPv6: boundIPv6,
+            progress: progress
+        )
     }
 
     private func probeReachability(
@@ -642,6 +675,10 @@ public final class ResolverScannerService: @unchecked Sendable {
         testProfile.configuration.localDNS.enabled = false
         testProfile.configuration.resolver.packetDuplicationCount = 1
         testProfile.configuration.resolver.setupPacketDuplicationCount = 1
+        // Keep an isolated throughput session consistent with the evaluator's
+        // MTU retry setting. This also makes a selective row test honor the
+        // same attempt count as the bulk throughput pass.
+        testProfile.configuration.mtu.testRetries = min(max(options.attempts, 1), 20)
         testProfile.configuration.normalize()
 
         let engine = MasterDnsEngine()

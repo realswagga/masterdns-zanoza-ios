@@ -249,6 +249,25 @@ final class ProxySpeedTestParsingTests: XCTestCase {
         )
     }
 
+    func testSelectiveThroughputDoesNotProbeProhibitedResolver() async throws {
+        let endpoint = try XCTUnwrap(ResolverEndpoint(host: "194.226.80.1"))
+        do {
+            _ = try await ResolverScannerService().testThroughput(
+                for: endpoint,
+                profile: .empty,
+                settings: AppSettings(),
+                options: ResolverScanOptions(),
+                runtimeDirectory: FileManager.default.temporaryDirectory
+                    .appendingPathComponent(UUID().uuidString)
+            )
+            XCTFail("A prohibited resolver must be rejected before starting a session")
+        } catch let error as ResolverScannerError {
+            XCTAssertEqual(error.errorDescription, "This resolver is in a prohibited scan range.")
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
     func testAutonomousScanOptionsNormalizeDomainsAndRecordTypes() {
         let options = ResolverScanOptions(
             reconciliationDomains: [" google.com. ", "", "max.ru", "invalid"],
