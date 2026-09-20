@@ -239,6 +239,16 @@ final class RegionalResolverDiscoveryTests: XCTestCase {
 }
 
 final class ProxySpeedTestParsingTests: XCTestCase {
+    func testThroughputDefaultsUseTwoMtuAttemptsAndFiveCandidates() {
+        let options = ResolverScanOptions()
+        XCTAssertEqual(options.attempts, 2)
+        XCTAssertEqual(options.throughputCandidateLimit, 5)
+        XCTAssertEqual(
+            ResolverScanOptions(throughputCandidateLimit: 500).throughputCandidateLimit,
+            50
+        )
+    }
+
     func testAutonomousScanOptionsNormalizeDomainsAndRecordTypes() {
         let options = ResolverScanOptions(
             reconciliationDomains: [" google.com. ", "", "max.ru", "invalid"],
@@ -273,5 +283,30 @@ final class ProxySpeedTestParsingTests: XCTestCase {
         XCTAssertEqual(try ProxySpeedTestService.parseHTTPResponse(response), Data("test".utf8))
         let failure = Data("HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\n\r\n".utf8)
         XCTAssertThrowsError(try ProxySpeedTestService.parseHTTPResponse(failure))
+    }
+
+    func testPartialContentLengthResponseKeepsDownloadedBytes() throws {
+        let response = Data((
+            "HTTP/1.1 200 OK\r\n"
+            + "Content-Length: 1000000\r\n"
+            + "Connection: keep-alive\r\n"
+            + "\r\n"
+            + "partial-body"
+        ).utf8)
+        let snapshot = try ProxySpeedTestService.parseHTTPResponseSnapshot(response)
+        XCTAssertEqual(snapshot.bytes, 12)
+        XCTAssertFalse(snapshot.complete)
+    }
+
+    func testPartialChunkedResponseCountsPayloadBeforeTimeout() throws {
+        let response = Data((
+            "HTTP/1.1 200 OK\r\n"
+            + "Transfer-Encoding: chunked\r\n"
+            + "\r\n"
+            + "8\r\npartial!"
+        ).utf8)
+        let snapshot = try ProxySpeedTestService.parseHTTPResponseSnapshot(response)
+        XCTAssertEqual(snapshot.bytes, 8)
+        XCTAssertFalse(snapshot.complete)
     }
 }

@@ -58,6 +58,15 @@ public struct ProxySpeedTestView: View {
                             .font(.caption.monospacedDigit())
                             .foregroundStyle(.secondary)
                     }
+                    if let ping = progress?.latencyMS {
+                        LabeledContent("Ping", value: formatMS(ping))
+                    }
+                    if let rate = progress?.bytesPerSecond {
+                        LabeledContent("Current rate", value: formatBytesPerSecond(rate))
+                    }
+                    if let elapsed = progress?.elapsedSeconds {
+                        LabeledContent("Window", value: formatSeconds(elapsed))
+                    }
                 }
             }
 
@@ -66,9 +75,21 @@ public struct ProxySpeedTestView: View {
                     LabeledContent("Proxy egress IP", value: result.egressIP)
                     LabeledContent("SOCKS / remote handshake", value: formatMS(result.proxyHandshakeMS))
                     LabeledContent("Download", value: formatMbps(result.downloadMbps))
+                    LabeledContent("Download ping", value: formatMS(result.downloadPingMS))
+                    LabeledContent("Download window", value: formatSeconds(result.downloadElapsedSeconds))
                     LabeledContent("Upload", value: formatMbps(result.uploadMbps))
                     LabeledContent("Downloaded", value: ByteCountFormatter.string(fromByteCount: Int64(result.downloadedBytes), countStyle: .file))
                     LabeledContent("Uploaded", value: ByteCountFormatter.string(fromByteCount: Int64(result.uploadedBytes), countStyle: .file))
+                    if result.downloadTimedOut {
+                        Text("Download window ended with partial data; the sample was retained because bytes were received.")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
+                    if let reason = result.uploadFailureReason {
+                        Text("Upload note: " + reason)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
 
@@ -164,7 +185,15 @@ public struct ProxySpeedTestView: View {
                 guard !Task.isCancelled else { return }
                 await MainActor.run {
                     result = value
-                    testLogs.append("Complete · egress \(value.egressIP) · ↓ \(formatMbps(value.downloadMbps)) · ↑ \(formatMbps(value.uploadMbps))")
+                    var completion = "Complete · egress " + value.egressIP
+                        + " · ↓ " + formatMbps(value.downloadMbps)
+                        + " / " + ByteCountFormatter.string(fromByteCount: Int64(value.downloadedBytes), countStyle: .file)
+                        + " / ping " + formatMS(value.downloadPingMS)
+                        + " · ↑ " + formatMbps(value.uploadMbps)
+                    if let reason = value.uploadFailureReason {
+                        completion += " · upload note: " + reason
+                    }
+                    testLogs.append(completion)
                     stage = nil
                     progress = nil
                     task = nil
@@ -201,6 +230,10 @@ public struct ProxySpeedTestView: View {
 
     private func formatMS(_ value: Double) -> String { String(format: "%.0f ms", value) }
     private func formatMbps(_ value: Double) -> String { String(format: "%.2f Mbit/s", value) }
+    private func formatBytesPerSecond(_ value: Double) -> String {
+        String(format: "%.2f Mbit/s", value * 8 / 1_000_000)
+    }
+    private func formatSeconds(_ value: Double) -> String { String(format: "%.1f s", value) }
 
     private func acquireIdleTimer() {
         #if os(iOS)

@@ -104,7 +104,7 @@ The embedded proxy nevertheless accepts the user/password-only SOCKS greeting pr
 - Import parent pools from the clipboard, plain text, CSV-like files, JSON, IPv4/IPv6 addresses, or bounded IPv4 CIDRs.
 - Create evaluated child presets and Top 5/10/20/50/100 lists by balanced, latency, reliability, or measured-throughput rank.
 - Direct DNS reachability is only a prefilter. The native stage sends real encrypted MasterDNS MTU probes using the profile domain/key.
-- The optional throughput stage is deliberately bounded to the top 1–20 candidates. It launches a separate one-resolver MasterDNS session and runs the explicit SOCKS test for each candidate.
+- The optional throughput stage is deliberately bounded to the top 1–50 candidates (default 5). It launches a separate one-resolver MasterDNS session and runs a bounded explicit SOCKS measurement for each candidate. A transfer that delivers partial data before the window ends is retained; only a zero-byte download is a timeout failure.
 - `194.226.0.0/16` is excluded from active scanning. CIDRs larger than 4,096 addresses are rejected, and Zanoza never discovers or scans arbitrary address ranges on its own.
 - The standalone speed test first verifies a remote egress IP and then downloads/uploads through a raw SOCKS5 connection. It never uses `URLSession`, so a direct Wi-Fi/cellular result cannot be mistaken for tunnel throughput.
 

@@ -101,6 +101,12 @@ public struct ResolverEvaluation: Codable, Equatable, Identifiable {
     public var tunnelLatencyMS: Double?
     public var downloadMbps: Double?
     public var uploadMbps: Double?
+    /// Bytes received during the bounded tunnel-throughput window.  This is
+    /// intentionally separate from `downloadMbps`: a slow resolver can still
+    /// provide useful partial data before the measurement window ends.
+    public var downloadedBytes: Int?
+    public var downloadElapsedSeconds: Double?
+    public var downloadPingMS: Double?
     public var failureReason: String?
     public var evaluatedAt: Date
 
@@ -117,6 +123,9 @@ public struct ResolverEvaluation: Codable, Equatable, Identifiable {
         tunnelLatencyMS: Double? = nil,
         downloadMbps: Double? = nil,
         uploadMbps: Double? = nil,
+        downloadedBytes: Int? = nil,
+        downloadElapsedSeconds: Double? = nil,
+        downloadPingMS: Double? = nil,
         failureReason: String? = nil,
         evaluatedAt: Date = Date()
     ) {
@@ -132,6 +141,9 @@ public struct ResolverEvaluation: Codable, Equatable, Identifiable {
         self.tunnelLatencyMS = tunnelLatencyMS
         self.downloadMbps = downloadMbps
         self.uploadMbps = uploadMbps
+        self.downloadedBytes = downloadedBytes
+        self.downloadElapsedSeconds = downloadElapsedSeconds
+        self.downloadPingMS = downloadPingMS
         self.failureReason = failureReason
         self.evaluatedAt = evaluatedAt
     }

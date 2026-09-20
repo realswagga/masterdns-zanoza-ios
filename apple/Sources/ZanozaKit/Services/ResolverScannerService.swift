@@ -6,6 +6,8 @@ import Mobile
 #endif
 
 public struct ResolverScanOptions: Equatable {
+    /// Number of attempts for direct DNS checks and the corresponding native
+    /// MasterDNS MTU probe retry count.
     public var attempts: Int
     public var timeoutSeconds: Double
     public var maximumConcurrency: Int
@@ -28,7 +30,10 @@ public struct ResolverScanOptions: Equatable {
     public var reconciliationRecordTypes: [UInt16]
 
     public init(
-        attempts: Int = 5,
+        // Two MTU attempts are enough to reject an unstable resolver while
+        // keeping a large carrier pool practical.  The UI can still expose
+        // a higher value for deliberate re-checks.
+        attempts: Int = 2,
         timeoutSeconds: Double = 2,
         maximumConcurrency: Int = 32,
         runMasterDnsMTUProbe: Bool = true,
@@ -53,7 +58,10 @@ public struct ResolverScanOptions: Equatable {
         self.nativeScanTimeoutSeconds = min(max(nativeScanTimeoutSeconds, 5), 3_600)
         self.allowPrivateResolvers = allowPrivateResolvers
         self.runThroughputProbe = runThroughputProbe
-        self.throughputCandidateLimit = min(max(throughputCandidateLimit, 1), 20)
+        // Throughput is deliberately opt-in, but when it is enabled users
+        // may need to compare a broad pool.  Keep the upper bound finite so a
+        // scan cannot accidentally start an unbounded number of tunnels.
+        self.throughputCandidateLimit = min(max(throughputCandidateLimit, 1), 50)
         self.throughputProxyPort = min(max(throughputProxyPort, 1_024), 65_535)
         self.throughputReadinessTimeoutSeconds = min(max(throughputReadinessTimeoutSeconds, 10), 180)
         self.throughputTestTimeoutSeconds = min(max(throughputTestTimeoutSeconds, 5), 120)
@@ -179,6 +187,7 @@ public final class ResolverScannerService: @unchecked Sendable {
                     settings: settings,
                     runtimeDirectory: runtimeDirectory,
                     timeoutSeconds: options.nativeScanTimeoutSeconds,
+                    mtuRetries: options.attempts,
                     boundInterface: boundInterface,
                     boundIPv4: boundIPv4,
                     boundIPv6: boundIPv6,
@@ -430,6 +439,7 @@ public final class ResolverScannerService: @unchecked Sendable {
         settings: AppSettings,
         runtimeDirectory: URL,
         timeoutSeconds: Double,
+        mtuRetries: Int,
         boundInterface: String,
         boundIPv4: String,
         boundIPv6: String,
@@ -437,7 +447,14 @@ public final class ResolverScannerService: @unchecked Sendable {
         total: Int
     ) async throws -> NativeResolverScanPayload {
         #if canImport(Mobile)
-        let config = ConfigBuilder.buildTOML(for: profile, settings: settings)
+        var scanProfile = profile
+        // The evaluator's attempt control must reach the encrypted native
+        // probe as well as the preliminary DNS reachability stage.  Without
+        // this override the imported profile's runtime MTU retry count would
+        // silently remain in effect (historically often five attempts).
+        scanProfile.configuration.mtu.testRetries = min(max(mtuRetries, 1), 20)
+        scanProfile.configuration.normalize()
+        let config = ConfigBuilder.buildTOML(for: scanProfile, settings: settings)
         let resolvers = endpoints.map(\.canonicalAddress).joined(separator: "\n") + "\n"
         return try await withTaskCancellationHandler(operation: {
             try await Task.detached(priority: .userInitiated) {
@@ -480,7 +497,7 @@ public final class ResolverScannerService: @unchecked Sendable {
             MobileCancelScan()
         })
         #else
-        _ = (endpoints, profile, settings, runtimeDirectory, timeoutSeconds, boundInterface, boundIPv4, boundIPv6, progress, total)
+        _ = (endpoints, profile, settings, runtimeDirectory, timeoutSeconds, mtuRetries, boundInterface, boundIPv4, boundIPv6, progress, total)
         throw ResolverScannerError.nativeScannerUnavailable
         #endif
     }
@@ -545,10 +562,36 @@ public final class ResolverScannerService: @unchecked Sendable {
                 )
                 if let index = output.firstIndex(where: { $0.endpoint.id == candidate.endpoint.id }) {
                     output[index].downloadMbps = measured.downloadMbps
-                    output[index].uploadMbps = measured.uploadMbps
+                    output[index].uploadMbps = measured.uploadFailureReason == nil ? measured.uploadMbps : nil
+                    output[index].downloadedBytes = measured.downloadedBytes
+                    output[index].downloadElapsedSeconds = measured.downloadElapsedSeconds
+                    output[index].downloadPingMS = measured.downloadPingMS
                     output[index].tunnelLatencyMS = measured.proxyHandshakeMS
-                    output[index].failureReason = nil
+                    if let uploadFailure = measured.uploadFailureReason, !uploadFailure.isEmpty {
+                        output[index].failureReason = "Throughput upload: " + uploadFailure
+                    } else {
+                        output[index].failureReason = nil
+                    }
                 }
+                var measuredDetail = candidateLabel
+                    + " · ↓ "
+                    + ByteCountFormatter.string(fromByteCount: Int64(measured.downloadedBytes), countStyle: .file)
+                    + " / " + String(format: "%.2f Mbit/s", measured.downloadMbps)
+                    + " / ping " + String(format: "%.0f ms", measured.downloadPingMS)
+                if measured.downloadTimedOut {
+                    measuredDetail += " · window ended with data"
+                }
+                if let uploadFailure = measured.uploadFailureReason {
+                    measuredDetail += " · upload note: " + uploadFailure
+                }
+                progress(ResolverScanProgress(
+                    stage: .throughput,
+                    completed: offset + 1,
+                    total: candidates.count,
+                    accepted: output.filter { $0.downloadMbps != nil || $0.uploadMbps != nil }.count,
+                    detail: measuredDetail,
+                    snapshot: output
+                ))
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
@@ -561,14 +604,16 @@ public final class ResolverScannerService: @unchecked Sendable {
                     }
                 }
             }
-            progress(ResolverScanProgress(
-                stage: .throughput,
-                completed: offset + 1,
-                total: candidates.count,
-                accepted: output.filter { $0.downloadMbps != nil || $0.uploadMbps != nil }.count,
-                detail: candidate.endpoint.canonicalAddress,
-                snapshot: output
-            ))
+            if output.first(where: { $0.endpoint.id == candidate.endpoint.id })?.downloadMbps == nil {
+                progress(ResolverScanProgress(
+                    stage: .throughput,
+                    completed: offset + 1,
+                    total: candidates.count,
+                    accepted: output.filter { $0.downloadMbps != nil || $0.uploadMbps != nil }.count,
+                    detail: candidate.endpoint.canonicalAddress,
+                    snapshot: output
+                ))
+            }
         }
         return output
     }

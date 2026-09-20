@@ -338,10 +338,10 @@ struct ResolverScanView: View {
     let reconciliationDomains: [String]
     let automaticSelection: Bool
 
-    @State private var attempts = 5
+    @State private var attempts = 2
     @State private var runNative = true
     @State private var runThroughput = false
-    @State private var throughputCandidates = 3
+    @State private var throughputCandidates = 5
     @State private var progress: ResolverScanProgress?
     @State private var results: [ResolverEvaluation] = []
     @State private var selectedResolverIDs = Set<String>()
@@ -484,16 +484,16 @@ struct ResolverScanView: View {
                     .font(.caption.monospaced())
                     .foregroundStyle(.secondary)
             }
-            Stepper("Attempts: \(attempts)", value: $attempts, in: 1...10)
+            Stepper("MTU / DNS attempts: \(attempts)", value: $attempts, in: 1...10)
             Toggle("MasterDNS encrypted MTU probe", isOn: $runNative)
             Toggle("Single-resolver throughput test", isOn: $runThroughput)
             if runThroughput {
                 Stepper(
                     "Throughput candidates: \(throughputCandidates)",
                     value: $throughputCandidates,
-                    in: 1...10
+                    in: 1...50
                 )
-                Text("Each candidate is capped at 30 seconds for session readiness and 15 seconds per transfer phase. Slow or dead candidates fail fast and evaluation continues.")
+                Text("Each candidate gets a 30-second readiness window and a 15-second transfer measurement window. A resolver is rejected only when it transfers zero bytes; partial downloads are retained and ranked.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -757,7 +757,19 @@ struct ResolverScanView: View {
         if let latency = result.medianLatencyMS { values.append("\(String(format: "%.0f", latency)) ms") }
         if let up = result.uploadMTU { values.append("UP \(up)") }
         if let down = result.downloadMTU { values.append("DOWN \(down)") }
-        if let downMbps = result.downloadMbps { values.append("↓ \(String(format: "%.2f", downMbps)) Mbit/s") }
+        if let downMbps = result.downloadMbps {
+            var speed = "↓ \(String(format: "%.2f", downMbps)) Mbit/s"
+            if let bytes = result.downloadedBytes {
+                speed += " / \(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file))"
+            }
+            if let elapsed = result.downloadElapsedSeconds {
+                speed += " / \(String(format: "%.1fs", elapsed))"
+            }
+            if let ping = result.downloadPingMS {
+                speed += " / ping \(String(format: "%.0fms", ping))"
+            }
+            values.append(speed)
+        }
         if let upMbps = result.uploadMbps { values.append("↑ \(String(format: "%.2f", upMbps)) Mbit/s") }
         if let reason = result.failureReason, !reason.isEmpty { values.append(reason) }
         return values.joined(separator: " · ")
@@ -909,6 +921,12 @@ private struct ResolverStatisticsView: View {
         }
         if let speed = result.downloadMbps {
             parts.append("↓\(String(format: "%.2f", speed))")
+        }
+        if let bytes = result.downloadedBytes {
+            parts.append("\(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file))")
+        }
+        if let ping = result.downloadPingMS {
+            parts.append("ping \(String(format: "%.0f", ping))ms")
         }
         if let speed = result.uploadMbps {
             parts.append("↑\(String(format: "%.2f", speed))")
