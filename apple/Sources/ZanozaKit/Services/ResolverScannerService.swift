@@ -566,6 +566,7 @@ public final class ResolverScannerService: @unchecked Sendable {
                     output[index].downloadedBytes = measured.downloadedBytes
                     output[index].downloadElapsedSeconds = measured.downloadElapsedSeconds
                     output[index].downloadPingMS = measured.downloadPingMS
+                    output[index].downloadTimedOut = measured.downloadTimedOut
                     output[index].tunnelLatencyMS = measured.proxyHandshakeMS
                     if let uploadFailure = measured.uploadFailureReason, !uploadFailure.isEmpty {
                         output[index].failureReason = "Throughput upload: " + uploadFailure

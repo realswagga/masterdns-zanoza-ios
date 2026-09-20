@@ -107,6 +107,7 @@ public struct ResolverEvaluation: Codable, Equatable, Identifiable {
     public var downloadedBytes: Int?
     public var downloadElapsedSeconds: Double?
     public var downloadPingMS: Double?
+    public var downloadTimedOut: Bool?
     public var failureReason: String?
     public var evaluatedAt: Date
 
@@ -126,6 +127,7 @@ public struct ResolverEvaluation: Codable, Equatable, Identifiable {
         downloadedBytes: Int? = nil,
         downloadElapsedSeconds: Double? = nil,
         downloadPingMS: Double? = nil,
+        downloadTimedOut: Bool? = nil,
         failureReason: String? = nil,
         evaluatedAt: Date = Date()
     ) {
@@ -144,6 +146,7 @@ public struct ResolverEvaluation: Codable, Equatable, Identifiable {
         self.downloadedBytes = downloadedBytes
         self.downloadElapsedSeconds = downloadElapsedSeconds
         self.downloadPingMS = downloadPingMS
+        self.downloadTimedOut = downloadTimedOut
         self.failureReason = failureReason
         self.evaluatedAt = evaluatedAt
     }

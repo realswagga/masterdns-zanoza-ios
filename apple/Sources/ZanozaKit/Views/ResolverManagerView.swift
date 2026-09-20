@@ -768,6 +768,9 @@ struct ResolverScanView: View {
             if let ping = result.downloadPingMS {
                 speed += " / ping \(String(format: "%.0fms", ping))"
             }
+            if result.downloadTimedOut == true {
+                speed += " / partial window"
+            }
             values.append(speed)
         }
         if let upMbps = result.uploadMbps { values.append("↑ \(String(format: "%.2f", upMbps)) Mbit/s") }
@@ -927,6 +930,9 @@ private struct ResolverStatisticsView: View {
         }
         if let ping = result.downloadPingMS {
             parts.append("ping \(String(format: "%.0f", ping))ms")
+        }
+        if result.downloadTimedOut == true {
+            parts.append("partial")
         }
         if let speed = result.uploadMbps {
             parts.append("↑\(String(format: "%.2f", speed))")
