@@ -592,7 +592,7 @@ struct ResolverScanView: View {
 
     @ViewBuilder
     private var resultsSection: some View {
-        Section("Results · tap to select") {
+        Section {
             ForEach(Array(sortedResults.prefix(250))) { result in
                 ResolverEvaluationRow(
                     result: result,
@@ -606,6 +606,8 @@ struct ResolverScanView: View {
                     onThroughputTest: { testThroughput(result) }
                 )
             }
+        } header: {
+            Text("Results · tap to select")
         } footer: {
             Text("Long-press any resolver to run a selective throughput test. Its bytes, speed, ping, and partial-window status are written back to this evaluation.")
         }
