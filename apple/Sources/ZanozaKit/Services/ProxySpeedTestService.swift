@@ -763,7 +763,7 @@ private final class AsyncTCPConnection: @unchecked Sendable {
         timeout: Double,
         stage: ProxySpeedTestStage,
         stopWhen: @escaping @Sendable (Data) -> Bool = { _ in false },
-        progress: @escaping @Sendable (Int) -> Void = { _ in }
+        progress: @escaping @Sendable (Data) -> Void = { _ in }
     ) async throws -> ReceiveResult {
         try await withCheckedThrowingContinuation { continuation in
             let gate = ThrowingContinuationGate<ReceiveResult>(continuation)
@@ -778,7 +778,7 @@ private final class AsyncTCPConnection: @unchecked Sendable {
                 connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1_024) { data, _, complete, error in
                     if let data { buffer.append(data) }
                     let snapshot = buffer.snapshot()
-                    progress(snapshot.count)
+                    progress(snapshot)
                     if snapshot.count > maximumBytes {
                         gate.succeed(
                             ReceiveResult(data: snapshot, timedOut: false, stoppedEarly: true),

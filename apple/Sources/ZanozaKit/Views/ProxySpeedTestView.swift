@@ -57,6 +57,13 @@ public struct ProxySpeedTestView: View {
                         Text("\(ByteCountFormatter.string(fromByteCount: Int64(progress.completedBytes), countStyle: .file)) / \(ByteCountFormatter.string(fromByteCount: Int64(total), countStyle: .file))")
                             .font(.caption.monospacedDigit())
                             .foregroundStyle(.secondary)
+                    } else if let progress, progress.completedBytes > 0 {
+                        Text("Received " + ByteCountFormatter.string(
+                            fromByteCount: Int64(progress.completedBytes),
+                            countStyle: .file
+                        ))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
                     }
                     if let ping = progress?.latencyMS {
                         LabeledContent("Ping", value: formatMS(ping))
