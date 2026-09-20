@@ -202,6 +202,8 @@ public final class ProxySpeedTestService: @unchecked Sendable {
                     progress: progress
                 )
                 uploadFailureReason = nil
+            } catch is CancellationError {
+                throw CancellationError()
             } catch {
                 // Upload response endpoints frequently buffer or keep the
                 // connection open.  Keep the valid download sample instead
@@ -218,6 +220,7 @@ public final class ProxySpeedTestService: @unchecked Sendable {
             let uploadMbps = upload.map {
                 Self.megabitsPerSecond(bytes: uploadBody.count, seconds: $0.elapsedSeconds)
             } ?? 0
+            try Task.checkCancellation()
 
             return ProxySpeedTestResult(
                 proxyHandshakeMS: max(egress.handshakeMS, max(download.handshakeMS, upload?.handshakeMS ?? 0)),
